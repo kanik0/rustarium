@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rustarium - Solar System Explorer</title>
+    <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+    <div id="app">
+        <!-- 3D Canvas -->
+        <canvas id="solar-system"></canvas>
+
+        <!-- Top bar -->
+        <header id="topbar">
+            <div class="logo">
+                <span class="star">&#10022;</span> RUSTARIUM
+            </div>
+            <div class="controls">
+                <input type="date" id="date-picker" />
+                <button id="btn-today" title="Today">Today</button>
+                <div class="speed-control">
+                    <button id="btn-play" title="Play/Pause">&#9654;</button>
+                    <select id="speed-select" title="Animation speed">
+                        <option value="0.25">0.25 day/s</option>
+                        <option value="0.5">0.5 day/s</option>
+                        <option value="1" selected>1 day/s</option>
+                        <option value="3">3 day/s</option>
+                        <option value="7">1 week/s</option>
+                        <option value="14">2 weeks/s</option>
+                        <option value="30">1 month/s</option>
+                        <option value="90">3 months/s</option>
+                        <option value="365">1 year/s</option>
+                    </select>
+                </div>
+            </div>
+        </header>
+
+        <!-- Info panel (right sidebar) -->
+        <aside id="info-panel" class="panel hidden">
+            <button class="close-btn" id="close-panel">&times;</button>
+            <h2 id="panel-title">Planet</h2>
+            <div class="tabs">
+                <button class="tab-btn active" data-tab="position">Position</button>
+                <button class="tab-btn" data-tab="riseset">Rise/Set</button>
+            </div>
+            <div id="tab-position" class="tab-content"></div>
+            <div id="tab-riseset" class="tab-content hidden"></div>
+        </aside>
+
+        <!-- Bottom bar: planet selector -->
+        <nav id="planet-bar">
+            <button class="planet-btn" data-body="sun" style="--color: #FFD700">
+                <span class="dot"></span> Sun
+            </button>
+            <button class="planet-btn" data-body="mercury" style="--color: #B0B0B0">
+                <span class="dot"></span> Mercury
+            </button>
+            <button class="planet-btn" data-body="venus" style="--color: #E8D44D">
+                <span class="dot"></span> Venus
+            </button>
+            <button class="planet-btn" data-body="earth" style="--color: #4488FF">
+                <span class="dot"></span> Earth
+            </button>
+            <button class="planet-btn" data-body="mars" style="--color: #E05040">
+                <span class="dot"></span> Mars
+            </button>
+            <button class="planet-btn" data-body="jupiter" style="--color: #D4A574">
+                <span class="dot"></span> Jupiter
+            </button>
+            <button class="planet-btn" data-body="saturn" style="--color: #C8A84E">
+                <span class="dot"></span> Saturn
+            </button>
+            <button class="planet-btn" data-body="uranus" style="--color: #72C4C8">
+                <span class="dot"></span> Uranus
+            </button>
+            <button class="planet-btn" data-body="neptune" style="--color: #4060E0">
+                <span class="dot"></span> Neptune
+            </button>
+            <button class="planet-btn" data-body="moon" style="--color: #CCCCCC">
+                <span class="dot"></span> Moon
+            </button>
+        </nav>
+
+        <!-- Location widget -->
+        <div id="location-widget" class="widget">
+            <h3>Observer</h3>
+            <div class="loc-row">
+                <select id="city-select">
+                    <option value="41.9028,12.4964">Roma</option>
+                    <option value="45.4642,9.19">Milano</option>
+                    <option value="40.8518,14.2681">Napoli</option>
+                    <option value="51.5074,-0.1278">London</option>
+                    <option value="48.8566,2.3522">Paris</option>
+                    <option value="52.52,13.405">Berlin</option>
+                    <option value="40.4168,-3.7038">Madrid</option>
+                    <option value="40.7128,-74.006">New York</option>
+                    <option value="34.0522,-118.2437">Los Angeles</option>
+                    <option value="35.6762,139.6503">Tokyo</option>
+                    <option value="-33.8688,151.2093">Sydney</option>
+                    <option value="custom">Custom...</option>
+                </select>
+            </div>
+            <div id="custom-coords" class="loc-row hidden">
+                <input type="number" id="obs-lat" placeholder="Lat" step="0.01" />
+                <input type="number" id="obs-lon" placeholder="Lon" step="0.01" />
+            </div>
+            <div class="loc-display">
+                <span id="obs-label">41.90N, 12.50E</span>
+            </div>
+        </div>
+
+        <!-- Moon phase widget -->
+        <div id="moon-widget" class="widget">
+            <div id="moon-icon">&#127765;</div>
+            <div id="moon-info">
+                <span id="moon-phase">Full Moon</span>
+                <span id="moon-illum">100%</span>
+            </div>
+        </div>
+
+        <!-- Eclipse widget -->
+        <div id="eclipse-widget" class="widget hidden">
+            <h3>Upcoming Eclipses</h3>
+            <div id="eclipse-list"></div>
+        </div>
+    </div>
+
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+        }
+    }
+    </script>
+    <script type="module" src="/js/app.js"></script>
+</body>
+</html>

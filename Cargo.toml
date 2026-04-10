@@ -1,0 +1,22 @@
+[workspace]
+members = ["crates/rustarium-core", "crates/rustarium-cli", "crates/rustarium-web", "crates/rustarium-wasm"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+authors = ["Massimo Bedini"]
+
+[workspace.dependencies]
+rustarium-core = { path = "crates/rustarium-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+# Optimizations for WASM release builds
+[profile.release]
+lto = true
+strip = true
+codegen-units = 1
+opt-level = "z"

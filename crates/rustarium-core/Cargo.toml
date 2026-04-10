@@ -1,0 +1,12 @@
+[package]
+name = "rustarium-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+vsop87 = "2"
+
+[dev-dependencies]
+serde_json = { workspace = true }
