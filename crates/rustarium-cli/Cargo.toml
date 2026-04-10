@@ -1,0 +1,17 @@
+[package]
+name = "rustarium-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "rustarium"
+path = "src/main.rs"
+
+[dependencies]
+rustarium-core = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+chrono = { version = "0.4", features = ["clock"] }
+comfy-table = "7"
+serde = { workspace = true }
+serde_json = { workspace = true }
+owo-colors = "4"
