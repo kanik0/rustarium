@@ -183,4 +183,4 @@ system.propagate_to(target_jd, Some(1.0));
 
 ## License
 
-MIT OR Apache-2.0
+Apache-2.0
