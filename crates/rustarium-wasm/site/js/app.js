@@ -36,6 +36,20 @@ let observerLon = 12.4964;
 let targetPositions = {};
 let currentPositions = {};
 
+// Custom bodies state
+let customBodyMeshes = {};
+let customOrbitLines = {};
+let customBodies = {};          // name -> { name, body_type, elements, diameter_km, sbdb_data }
+const STORAGE_KEY = 'rustarium_custom_bodies';
+
+const CUSTOM_BODY_COLORS = {
+    'Asteroid':     0x88AA88,
+    'Comet':        0x66CCFF,
+    'Dwarf Planet': 0xCC88DD,
+    'TNO':          0x99AACC,
+    'Unknown':      0xAAAA88,
+};
+
 function init() {
     const canvas = document.getElementById('solar-system');
     renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
@@ -208,11 +222,130 @@ function createMoonOrbit() {
     scene.add(moonOrbitLine);
 }
 
+// --- Custom body visualization ---
+
+function addCustomBodyMesh(body) {
+    const color = CUSTOM_BODY_COLORS[body.body_type] || 0xAAAA88;
+    const size = body.diameter_km && body.diameter_km > 500 ? 0.022
+              : body.diameter_km && body.diameter_km > 100 ? 0.016
+              : 0.012;
+
+    const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.8 });
+    const mesh = new THREE.Mesh(new THREE.SphereGeometry(size, 12, 8), mat);
+    mesh.userData = { bodyName: body.name, isCustom: true };
+    scene.add(mesh);
+    customBodyMeshes[body.name] = mesh;
+    targetPositions[body.name] = new THREE.Vector3();
+
+    if (body.elements) {
+        const line = createCustomOrbitLine(body);
+        if (line) {
+            scene.add(line);
+            customOrbitLines[body.name] = line;
+        }
+    }
+    addCustomBodyButton(body);
+}
+
+function removeCustomBodyMesh(name) {
+    if (customBodyMeshes[name]) {
+        scene.remove(customBodyMeshes[name]);
+        customBodyMeshes[name].geometry.dispose();
+        customBodyMeshes[name].material.dispose();
+        delete customBodyMeshes[name];
+    }
+    if (customOrbitLines[name]) {
+        scene.remove(customOrbitLines[name]);
+        customOrbitLines[name].geometry.dispose();
+        customOrbitLines[name].material.dispose();
+        delete customOrbitLines[name];
+    }
+    delete targetPositions[name];
+    const btn = document.querySelector(`.planet-btn[data-body="${CSS.escape(name)}"]`);
+    if (btn) btn.remove();
+}
+
+function createCustomOrbitLine(body) {
+    const el = body.elements;
+    if (!el || !el.a_au) return null;
+    const a = el.a_au;
+    const e = el.e || 0;
+    const incRad = (el.i_deg || 0) * Math.PI / 180 * 3.0;
+    const nodeRad = (el.om_deg || 0) * Math.PI / 180;
+    const omegaRad = (el.w_deg || 0) * Math.PI / 180;
+
+    const pts = [];
+    const steps = 256;
+
+    if (e < 1.0) {
+        for (let i = 0; i <= steps; i++) {
+            const nu = (i / steps) * Math.PI * 2;
+            const r_au = a * (1 - e * e) / (1 + e * Math.cos(nu));
+            if (r_au <= 0 || r_au > 120) continue;
+            const r = scaleDistance(r_au);
+            const [x, y, z] = rotateOrbitalPoint(nu, omegaRad, r, incRad, nodeRad);
+            pts.push(new THREE.Vector3(x, y, z));
+        }
+    } else {
+        const nu_max = Math.acos(Math.max(-1.0 / e, -1.0)) * 0.95;
+        for (let i = 0; i <= steps; i++) {
+            const nu = -nu_max + (i / steps) * 2 * nu_max;
+            const denom = 1 + e * Math.cos(nu);
+            if (denom <= 0) continue;
+            const r_au = Math.abs(a) * Math.abs(1 - e * e) / denom;
+            if (r_au <= 0 || r_au > 100) continue;
+            const r = scaleDistance(r_au);
+            const [x, y, z] = rotateOrbitalPoint(nu, omegaRad, r, incRad, nodeRad);
+            pts.push(new THREE.Vector3(x, y, z));
+        }
+    }
+
+    if (pts.length < 2) return null;
+    const color = CUSTOM_BODY_COLORS[body.body_type] || 0xAAAA88;
+    return new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints(pts),
+        new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.3 })
+    );
+}
+
+function rotateOrbitalPoint(nu, omegaRad, r, incRad, nodeRad) {
+    const angle = nu + omegaRad;
+    const x0 = r * Math.cos(angle);
+    const z0 = r * Math.sin(angle);
+    const cosN = Math.cos(-nodeRad), sinN = Math.sin(-nodeRad);
+    const x1 = x0 * cosN - z0 * sinN;
+    const z1 = x0 * sinN + z0 * cosN;
+    const y2 = z1 * Math.sin(incRad);
+    const z2 = z1 * Math.cos(incRad);
+    const cosN2 = Math.cos(nodeRad), sinN2 = Math.sin(nodeRad);
+    const x3 = x1 * cosN2 - z2 * sinN2;
+    const z3 = x1 * sinN2 + z2 * cosN2;
+    return [x3, y2, z3];
+}
+
+function addCustomBodyButton(body) {
+    const color = CUSTOM_BODY_COLORS[body.body_type] || 0xAAAA88;
+    const hex = '#' + color.toString(16).padStart(6, '0');
+    const btn = document.createElement('button');
+    btn.className = 'planet-btn custom-body-btn';
+    btn.dataset.body = body.name;
+    btn.style.setProperty('--color', hex);
+    const dot = document.createElement('span');
+    dot.className = 'dot';
+    btn.appendChild(dot);
+    btn.appendChild(document.createTextNode(' ' + body.name));
+    btn.addEventListener('click', (e) => { e.stopPropagation(); selectBody(body.name); });
+    const addBtn = document.getElementById('btn-add-body');
+    if (addBtn) addBtn.parentNode.insertBefore(btn, addBtn);
+}
+
 function highlightOrbit(bodyName) {
     for (const [name, line] of Object.entries(orbitLines)) {
         line.material.opacity = name === bodyName ? 0.7 : 0.2;
     }
-    // Moon orbit highlight
+    for (const [name, line] of Object.entries(customOrbitLines)) {
+        line.material.opacity = name === bodyName ? 0.7 : 0.3;
+    }
     if (moonOrbitLine) {
         moonOrbitLine.material.opacity = bodyName === 'moon' ? 0.6 : 0.2;
     }
@@ -256,6 +389,23 @@ function setTargetPositions(data) {
         );
     }
 
+    // Custom bodies
+    if (data.custom_bodies) {
+        for (const cb of data.custom_bodies) {
+            if (!targetPositions[cb.name]) continue;
+            const lon = (cb.helio_lon_deg || 0) * Math.PI / 180;
+            const lat = (cb.helio_lat_deg || 0) * Math.PI / 180;
+            const dist = cb.helio_distance_au || 1;
+            const s = scaleDistance(dist);
+            const cosLat = Math.cos(lat);
+            targetPositions[cb.name].set(
+                s * cosLat * Math.cos(lon),
+                s * Math.sin(lat) * 3.0,
+                -s * cosLat * Math.sin(lon)
+            );
+        }
+    }
+
     if (data.moon) {
         const illum = data.moon.illumination || 0;
         updateMoonWidget(illum, data.moon.phase_name || 'Moon');
@@ -269,7 +419,11 @@ function interpolatePositions(alpha) {
         if (!target) continue;
         mesh.position.lerp(target, t);
     }
-    // Move Moon orbit ring to Earth's position
+    for (const [name, mesh] of Object.entries(customBodyMeshes)) {
+        const target = targetPositions[name];
+        if (!target) continue;
+        mesh.position.lerp(target, t);
+    }
     if (moonOrbitLine && planetMeshes['earth']) {
         moonOrbitLine.position.copy(planetMeshes['earth'].position);
     }
@@ -377,12 +531,14 @@ async function selectBody(bodyName) {
     });
     highlightOrbit(bodyName);
 
-    const mesh = planetMeshes[bodyName];
+    const mesh = planetMeshes[bodyName] || customBodyMeshes[bodyName];
     if (mesh) controls.target.copy(mesh.position);
 
     const panel = document.getElementById('info-panel');
     panel.classList.remove('hidden');
-    document.getElementById('panel-title').textContent = PLANET_DATA[bodyName]?.label || bodyName;
+    const isCustom = !!customBodies[bodyName];
+    const label = isCustom ? bodyName : (PLANET_DATA[bodyName]?.label || bodyName);
+    document.getElementById('panel-title').textContent = label;
 
     document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === 'position'));
     document.querySelectorAll('.tab-content').forEach(c => c.classList.toggle('hidden', c.id !== 'tab-position'));
@@ -391,17 +547,25 @@ async function selectBody(bodyName) {
 }
 
 async function refreshPanel(bodyName) {
+    const isCustom = !!customBodies[bodyName];
+
     try {
-        const data = await api.fetchPosition(bodyName, currentDate);
+        const data = isCustom
+            ? await api.fetchCustomPosition(bodyName, currentDate)
+            : await api.fetchPosition(bodyName, currentDate);
         const pos = data.position || {};
         const el = document.getElementById('tab-position');
         el.textContent = '';
+        if (isCustom && pos.body_type) {
+            addSection(el, pos.body_type);
+        }
         addSection(el, 'Equatorial');
         addRow(el, 'RA', pos.ra_hms || '-');
         addRow(el, 'Dec', pos.dec_dms || '-');
         if (pos.distance_au) addRow(el, 'Distance', `${pos.distance_au.toFixed(4)} AU`);
         else if (pos.distance_km) addRow(el, 'Distance', `${Math.round(pos.distance_km).toLocaleString()} km`);
         if (pos.distance_from_sun_au) addRow(el, 'From Sun', `${pos.distance_from_sun_au.toFixed(4)} AU`);
+        if (pos.diameter_km) addRow(el, 'Diameter', `${pos.diameter_km.toFixed(1)} km`);
         if (pos.illumination !== undefined) {
             addSection(el, 'Phase');
             addRow(el, 'Illumination', `${(pos.illumination * 100).toFixed(1)}%`);
@@ -409,7 +573,9 @@ async function refreshPanel(bodyName) {
     } catch (_) {}
 
     try {
-        const rs = await api.fetchRiseSet(bodyName, currentDate, observerLat, observerLon);
+        const rs = isCustom
+            ? await api.fetchCustomRiseSet(bodyName, currentDate, observerLat, observerLon)
+            : await api.fetchRiseSet(bodyName, currentDate, observerLat, observerLon);
         const el = document.getElementById('tab-riseset');
         el.textContent = '';
         addSection(el, `${Math.abs(observerLat).toFixed(1)}\u00B0${observerLat>=0?'N':'S'}, ${Math.abs(observerLon).toFixed(1)}\u00B0${observerLon>=0?'E':'W'}`);
@@ -486,7 +652,8 @@ function onCanvasClick(event) {
     mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
     mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
     raycaster.setFromCamera(mouse, camera);
-    const intersects = raycaster.intersectObjects(Object.values(planetMeshes), true);
+    const allMeshes = [...Object.values(planetMeshes), ...Object.values(customBodyMeshes)];
+    const intersects = raycaster.intersectObjects(allMeshes, true);
     if (intersects.length > 0) {
         let obj = intersects[0].object;
         while (obj.parent && !obj.userData.bodyName) obj = obj.parent;
@@ -531,6 +698,7 @@ function animate(time = 0) {
     }
 
     for (const mesh of Object.values(planetMeshes)) mesh.rotation.y += 0.001;
+    for (const mesh of Object.values(customBodyMeshes)) mesh.rotation.y += 0.001;
     controls.update();
     renderer.render(scene, camera);
 }
@@ -544,11 +712,227 @@ function onResize() {
 function fmtDate(d) { return d.toISOString().split('T')[0]; }
 function cap(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
 
+// --- Search dialog ---
+
+let lastSearchResult = null;
+
+function setupSearchDialog() {
+    const addBtn = document.getElementById('btn-add-body');
+    if (!addBtn) return;
+    addBtn.addEventListener('click', openSearchModal);
+    document.getElementById('close-search').addEventListener('click', closeSearchModal);
+    document.getElementById('btn-search').addEventListener('click', performSearch);
+    document.getElementById('search-input').addEventListener('keypress', e => {
+        if (e.key === 'Enter') performSearch();
+    });
+    document.getElementById('btn-add-result').addEventListener('click', addSearchResult);
+
+    // Close on background click
+    document.getElementById('search-modal').addEventListener('click', e => {
+        if (e.target.id === 'search-modal') closeSearchModal();
+    });
+}
+
+function openSearchModal() {
+    document.getElementById('search-modal').classList.remove('hidden');
+    document.getElementById('search-input').focus();
+    updateTrackedList();
+}
+
+function closeSearchModal() {
+    document.getElementById('search-modal').classList.add('hidden');
+}
+
+function showSearchStatus(msg, isError) {
+    const el = document.getElementById('search-status');
+    el.textContent = msg;
+    el.classList.remove('hidden');
+    el.classList.toggle('error', !!isError);
+    document.getElementById('search-result').classList.add('hidden');
+}
+
+async function performSearch() {
+    const query = document.getElementById('search-input').value.trim();
+    if (!query) return;
+
+    showSearchStatus('Searching JPL database...');
+    try {
+        const data = await api.searchSBDB(query);
+        if (!data.object) {
+            showSearchStatus(data.message || 'Object not found. Try a more specific name or designation.', true);
+            return;
+        }
+        lastSearchResult = data;
+        showSearchResultCard(data);
+    } catch (err) {
+        showSearchStatus(err.name === 'AbortError' ? 'Request timed out. Try again.' : `Error: ${err.message}`, true);
+    }
+}
+
+function showSearchResultCard(data) {
+    document.getElementById('search-status').classList.add('hidden');
+    const resultEl = document.getElementById('search-result');
+    resultEl.classList.remove('hidden');
+
+    document.getElementById('result-name').textContent = data.object.fullname || data.object.des || 'Unknown';
+    const badge = document.getElementById('result-type');
+    const kind = data.object.kind || '';
+    badge.textContent = kind.startsWith('c') ? 'Comet' : kind.startsWith('a') ? 'Asteroid' : 'Object';
+
+    const details = document.getElementById('result-details');
+    details.textContent = '';
+    if (data.orbit && data.orbit.elements) {
+        const elMap = {};
+        for (const el of data.orbit.elements) elMap[el.name] = parseFloat(el.value);
+        if (elMap.a) addDetailRow(details, 'Semi-major axis', `${elMap.a.toFixed(3)} AU`);
+        if (elMap.e !== undefined) addDetailRow(details, 'Eccentricity', elMap.e.toFixed(6));
+        if (elMap.i !== undefined) addDetailRow(details, 'Inclination', `${elMap.i.toFixed(2)}\u00B0`);
+    }
+    if (data.phys_par) {
+        for (const p of data.phys_par) {
+            if (p.name === 'diameter' && p.value) addDetailRow(details, 'Diameter', `${p.value} km`);
+        }
+    }
+}
+
+function addDetailRow(parent, label, value) {
+    const row = document.createElement('div');
+    row.className = 'result-detail-row';
+    const l = document.createElement('span');
+    l.className = 'label';
+    l.textContent = label;
+    const v = document.createElement('span');
+    v.className = 'value';
+    v.textContent = value;
+    row.appendChild(l);
+    row.appendChild(v);
+    parent.appendChild(row);
+}
+
+async function addSearchResult() {
+    if (!lastSearchResult) return;
+    const result = await api.addCustomBody(lastSearchResult);
+    if (result.error) {
+        showSearchStatus(result.error, true);
+        return;
+    }
+
+    const body = {
+        name: result.name,
+        body_type: result.body_type || 'Unknown',
+        elements: result.elements,
+        diameter_km: result.diameter_km,
+        sbdb_data: lastSearchResult,
+    };
+    customBodies[body.name] = body;
+    addCustomBodyMesh(body);
+    saveCustomBodiesToStorage();
+
+    // Refresh to get position
+    try {
+        const skyData = await api.fetchSky(currentDate);
+        setTargetPositions(skyData);
+        interpolatePositions(1.0);
+    } catch (_) {}
+
+    updateTrackedList();
+    lastSearchResult = null;
+    document.getElementById('search-result').classList.add('hidden');
+    document.getElementById('search-input').value = '';
+    showSearchStatus(`${body.name} added to orrery!`);
+}
+
+function updateTrackedList() {
+    const container = document.getElementById('tracked-items');
+    if (!container) return;
+    container.textContent = '';
+    const names = Object.keys(customBodies);
+    if (names.length === 0) {
+        const p = document.createElement('p');
+        p.textContent = 'No custom objects tracked.';
+        p.style.cssText = 'color:var(--text-dim);font-size:12px;margin:8px 0';
+        container.appendChild(p);
+        return;
+    }
+    for (const name of names) {
+        const body = customBodies[name];
+        const row = document.createElement('div');
+        row.className = 'tracked-item';
+        const label = document.createElement('span');
+        label.className = 'tracked-name';
+        label.textContent = `${name} (${body.body_type})`;
+        const rmBtn = document.createElement('button');
+        rmBtn.className = 'tracked-remove';
+        rmBtn.textContent = 'Remove';
+        rmBtn.addEventListener('click', () => removeTrackedBody(name));
+        row.appendChild(label);
+        row.appendChild(rmBtn);
+        container.appendChild(row);
+    }
+}
+
+async function removeTrackedBody(name) {
+    await api.removeCustomBody(name);
+    removeCustomBodyMesh(name);
+    delete customBodies[name];
+    saveCustomBodiesToStorage();
+    updateTrackedList();
+    if (selectedBody === name) {
+        selectedBody = null;
+        document.getElementById('info-panel').classList.add('hidden');
+    }
+}
+
+// --- localStorage persistence ---
+
+function saveCustomBodiesToStorage() {
+    try {
+        const data = Object.values(customBodies).map(b => ({
+            name: b.name,
+            body_type: b.body_type,
+            elements: b.elements,
+            diameter_km: b.diameter_km,
+            sbdb_data: b.sbdb_data,
+        }));
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+    } catch (_) {}
+}
+
+async function loadCustomBodiesFromStorage() {
+    try {
+        const stored = localStorage.getItem(STORAGE_KEY);
+        if (!stored) return;
+        const bodies = JSON.parse(stored);
+        for (const b of bodies) {
+            if (!b.sbdb_data) continue;
+            const result = await api.addCustomBody(b.sbdb_data);
+            if (result.error) continue;
+            const body = {
+                name: result.name,
+                body_type: result.body_type || b.body_type || 'Unknown',
+                elements: result.elements || b.elements,
+                diameter_km: result.diameter_km || b.diameter_km,
+                sbdb_data: b.sbdb_data,
+            };
+            customBodies[body.name] = body;
+            addCustomBodyMesh(body);
+        }
+    } catch (_) {}
+}
+
 // Initialize WASM module, then start the app
-api.initWasm().then(() => {
+api.initWasm().then(async () => {
     console.log('WASM loaded - all computation runs locally');
     init();
+    setupSearchDialog();
+    await loadCustomBodiesFromStorage();
+    // Refresh sky to include restored custom bodies
+    try {
+        const data = await api.fetchSky(currentDate);
+        setTargetPositions(data);
+        interpolatePositions(1.0);
+    } catch (_) {}
 }).catch(err => {
     console.error('WASM init failed:', err);
-    init(); // start anyway, API calls will fail gracefully
+    init();
 });

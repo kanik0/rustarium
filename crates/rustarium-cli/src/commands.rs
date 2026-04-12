@@ -4,10 +4,12 @@ use comfy_table::{presets::UTF8_FULL_CONDENSED, Attribute, Cell, Color, ContentA
 use owo_colors::OwoColorize;
 use rustarium_core::bodies::{Body, Planet};
 use rustarium_core::coords::{format_dec, format_ra};
+use rustarium_core::custom_body::CustomBody;
 use rustarium_core::eclipse::{lunar, solar};
 use rustarium_core::moon;
 use rustarium_core::planet;
 use rustarium_core::rise_set::{self, EventType};
+use rustarium_core::sbdb::SbdbResponse;
 use rustarium_core::sun;
 use rustarium_core::time::{date_from_jd, jd_from_date, JulianDay};
 
@@ -97,6 +99,30 @@ pub enum Command {
         #[arg(long, default_value = "1")]
         step: u32,
     },
+    /// Track an asteroid, comet or dwarf planet from JPL SBDB
+    Track {
+        /// Name, designation, or SPK-ID (e.g. "Ceres", "99942", "1P/Halley")
+        query: String,
+        /// Date (YYYY-MM-DD). Default: today
+        #[arg(short, long)]
+        date: Option<String>,
+        /// Number of days for ephemeris
+        #[arg(long, default_value = "30")]
+        days: u32,
+        /// Step in days
+        #[arg(long, default_value = "5")]
+        step: u32,
+        /// City name
+        #[arg(short, long)]
+        city: Option<String>,
+        #[arg(long)]
+        lat: Option<f64>,
+        #[arg(long)]
+        lon: Option<f64>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -140,6 +166,9 @@ pub fn run(cli: Cli) {
         Some(Command::Eclipse { kind }) => cmd_eclipse(kind),
         Some(Command::Ephemeris { body, start, days, step }) => {
             cmd_ephemeris(body, start, days, step)
+        }
+        Some(Command::Track { query, date, days, step, city, lat, lon, json }) => {
+            cmd_track(query, date, days, step, city, lat, lon, json)
         }
     }
 }
@@ -659,6 +688,268 @@ fn cmd_ephemeris(body_name: String, start: Option<String>, days: u32, step: u32)
     println!();
     println!("    {}", table.to_string().replace('\n', "\n    "));
     println!();
+}
+
+fn cmd_track(
+    query: String,
+    date: Option<String>,
+    days: u32,
+    step: u32,
+    city: Option<String>,
+    lat: Option<f64>,
+    lon: Option<f64>,
+    json: bool,
+) {
+    let jd = parse_date_or_today(&date);
+    let (loc, tz, loc_label) = resolve_location(&lat, &lon, &city);
+
+    // Fetch from JPL SBDB
+    println!(
+        "\n  {} Searching JPL Small-Body Database for '{}'...",
+        "⟳".bright_blue(),
+        query.bright_white()
+    );
+
+    let sbdb_url = format!(
+        "https://ssd-api.jpl.nasa.gov/sbdb.api?sstr={}&phys-par=true",
+        urlencoding::encode(&query)
+    );
+
+    // SBDB uses HTTP 300 for "multiple matches" — disable redirect handling to read these
+    let agent = ureq::Agent::new_with_config(
+        ureq::config::Config::builder()
+            .max_redirects(0)
+            .http_status_as_error(false)
+            .build(),
+    );
+    let resp_text = match agent.get(&sbdb_url).call() {
+        Ok(resp) => match resp.into_body().read_to_string() {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("  {} Failed to read response: {}", "✗".red(), e);
+                std::process::exit(1);
+            }
+        },
+        Err(e) => {
+            eprintln!("  {} Failed to reach JPL SBDB: {}", "✗".red(), e);
+            eprintln!("    Check your internet connection and try again.");
+            std::process::exit(1);
+        }
+    };
+
+    // Check for SBDB error/ambiguity before parsing as SbdbResponse
+    if let Ok(raw) = serde_json::from_str::<serde_json::Value>(&resp_text) {
+        if let Some(code) = raw.get("code").and_then(|c| c.as_str()) {
+            if code == "300" {
+                // Multiple matches
+                eprintln!("  {} Multiple matches for '{}'. Be more specific:", "!".yellow(), query);
+                if let Some(list) = raw.get("list").and_then(|l| l.as_array()) {
+                    for item in list {
+                        let name = item.get("name").and_then(|n| n.as_str()).unwrap_or("?");
+                        let pdes = item.get("pdes").and_then(|n| n.as_str()).unwrap_or("");
+                        eprintln!("    - {} ({})", name, pdes);
+                    }
+                }
+                std::process::exit(1);
+            }
+            if code != "200" {
+                let msg = raw.get("message").and_then(|m| m.as_str()).unwrap_or("unknown error");
+                eprintln!("  {} {}", "✗".red(), msg);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    let sbdb_resp: SbdbResponse = match serde_json::from_str(&resp_text) {
+        Ok(r) => r,
+        Err(_) => {
+            eprintln!("  {} Object not found: '{}'", "✗".red(), query);
+            eprintln!("    Try a more specific name, designation, or SPK-ID.");
+            eprintln!("    Examples: Ceres, 99942, 1P/Halley, 2024 YR4");
+            std::process::exit(1);
+        }
+    };
+
+    let body = match sbdb_resp.to_custom_body() {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("  {} {}", "✗".red(), e);
+            std::process::exit(1);
+        }
+    };
+
+    if json {
+        print_track_json(&body, jd, days, step, &loc);
+        return;
+    }
+
+    println!("  {} Found: {}\n", "✓".green(), body.name.bright_white().bold());
+
+    // Object info
+    header(&body.name);
+    section("Object");
+    kv("Type", body.body_type.name());
+    if let Some(des) = &body.designation {
+        kv("Designation", des);
+    }
+    kv("Epoch (JD)", &format!("{:.1}", body.epoch_jd));
+
+    let a_au = body.elements.semi_major_axis_km / rustarium_core::bodies::AU_KM;
+    section("Orbital Elements");
+    kv("Semi-major axis", &format!("{:.6} AU", a_au));
+    kv("Eccentricity", &format!("{:.6}", body.elements.eccentricity));
+    kv("Inclination", &format!("{:.4}°", body.elements.inclination_rad.to_degrees()));
+    kv("Asc. node (Ω)", &format!("{:.4}°", body.elements.longitude_ascending_node_rad.to_degrees()));
+    kv("Arg. perih. (ω)", &format!("{:.4}°", body.elements.argument_perihelion_rad.to_degrees()));
+
+    if let Some(d) = body.diameter_km {
+        section("Physical");
+        kv("Diameter", &format!("{:.1} km", d));
+    }
+    if let Some(h) = body.abs_magnitude_h {
+        if body.diameter_km.is_none() { section("Physical"); }
+        kv("Abs. magnitude (H)", &format!("{:.1}", h));
+    }
+
+    // Current position
+    let (y, m, d) = date_from_jd(jd);
+    section(&format!("Position on {:4}-{:02}-{:02}", y, m, d as u32));
+    let eq = body.apparent_equatorial(jd);
+    let geo = body.geocentric_position(jd);
+    let helio = body.heliocentric_position(jd);
+    kv_colored("Right Ascension", &format_ra(eq.ra));
+    kv_colored("Declination", &format_dec(eq.dec));
+    kv_colored("Distance (Earth)", &format!("{:.4} AU", geo.distance));
+    kv("Distance (Sun)", &format!("{:.4} AU", helio.distance));
+
+    // Rise/set
+    let jd_0h = JulianDay((jd.0 - 0.5).floor() + 0.5);
+    let h0 = (-0.5667_f64).to_radians();
+    let tz_name = tz.name_at(jd);
+    section(&format!("Rise/Set — {} ({})", loc_label, tz_name));
+    let eq_fn = |jd: JulianDay| body.apparent_equatorial(jd);
+    match rise_set::rise_transit_set_custom(jd_0h, &loc, h0, eq_fn) {
+        Ok(events) => {
+            for ev in &events {
+                let icon = match ev.event {
+                    EventType::Rise => "↑",
+                    EventType::Transit => "◉",
+                    EventType::Set => "↓",
+                };
+                let label = match ev.event {
+                    EventType::Rise => "Rise   ",
+                    EventType::Transit => "Transit",
+                    EventType::Set => "Set    ",
+                };
+                let extra = match ev.event {
+                    EventType::Rise | EventType::Set => {
+                        format!("  az {:.1}°", ev.azimuth_deg.unwrap_or(0.0))
+                    }
+                    EventType::Transit => {
+                        format!("  alt {:.1}°", ev.altitude_deg.unwrap_or(0.0))
+                    }
+                };
+                println!(
+                    "    {} {} {}{}",
+                    icon.yellow(),
+                    label,
+                    jd_to_local_time_str(ev.jd, &tz).bright_white(),
+                    extra.dimmed()
+                );
+            }
+        }
+        Err(_) => println!("    {}", "Not visible from this location today.".dimmed()),
+    }
+
+    // Ephemeris table
+    section(&format!("Ephemeris — {} days (step {}d)", days, step));
+    let mut table = Table::new();
+    table
+        .load_preset(UTF8_FULL_CONDENSED)
+        .set_content_arrangement(ContentArrangement::Dynamic)
+        .set_header(vec![
+            Cell::new("Date").add_attribute(Attribute::Bold),
+            Cell::new("RA").add_attribute(Attribute::Bold),
+            Cell::new("Dec").add_attribute(Attribute::Bold),
+            Cell::new("Δ Earth").add_attribute(Attribute::Bold),
+            Cell::new("r Sun").add_attribute(Attribute::Bold),
+        ]);
+
+    let mut i = 0u32;
+    while i < days {
+        let day_jd = jd + i as f64;
+        let (dy, dm, dd) = date_from_jd(day_jd);
+        let eq = body.apparent_equatorial(day_jd);
+        let geo = body.geocentric_position(day_jd);
+        let helio = body.heliocentric_position(day_jd);
+
+        table.add_row(vec![
+            Cell::new(format!("{:4}-{:02}-{:02}", dy, dm, dd as u32)),
+            Cell::new(format_ra(eq.ra)),
+            Cell::new(format_dec(eq.dec)),
+            Cell::new(format!("{:.4}", geo.distance)),
+            Cell::new(format!("{:.4}", helio.distance)),
+        ]);
+        i += step;
+    }
+
+    println!();
+    println!("    {}", table.to_string().replace('\n', "\n    "));
+    println!();
+}
+
+fn print_track_json(body: &CustomBody, jd: JulianDay, days: u32, step: u32, loc: &rustarium_core::coords::GeoLocation) {
+    let eq = body.apparent_equatorial(jd);
+    let geo = body.geocentric_position(jd);
+    let helio = body.heliocentric_position(jd);
+
+    let mut ephemeris = Vec::new();
+    let mut i = 0u32;
+    while i < days {
+        let day_jd = jd + i as f64;
+        let eq = body.apparent_equatorial(day_jd);
+        let geo = body.geocentric_position(day_jd);
+        let helio = body.heliocentric_position(day_jd);
+        let (dy, dm, dd) = date_from_jd(day_jd);
+        ephemeris.push(serde_json::json!({
+            "date": format!("{:4}-{:02}-{:02}", dy, dm, dd as u32),
+            "ra_deg": eq.ra.to_degrees(),
+            "dec_deg": eq.dec.to_degrees(),
+            "distance_au": geo.distance,
+            "distance_from_sun_au": helio.distance,
+        }));
+        i += step;
+    }
+
+    let jd_0h = JulianDay((jd.0 - 0.5).floor() + 0.5);
+    let h0 = (-0.5667_f64).to_radians();
+    let eq_fn = |jd: JulianDay| body.apparent_equatorial(jd);
+    let events: Vec<serde_json::Value> = rise_set::rise_transit_set_custom(jd_0h, loc, h0, eq_fn)
+        .map(|evs| evs.iter().map(|e| {
+            serde_json::json!({
+                "event": match e.event { EventType::Rise => "rise", EventType::Transit => "transit", EventType::Set => "set" },
+                "time_ut": jd_to_time_str(e.jd),
+                "azimuth_deg": e.azimuth_deg,
+                "altitude_deg": e.altitude_deg,
+            })
+        }).collect())
+        .unwrap_or_default();
+
+    let json = serde_json::json!({
+        "name": body.name,
+        "type": body.body_type.name(),
+        "designation": body.designation,
+        "diameter_km": body.diameter_km,
+        "position": {
+            "ra_hms": format_ra(eq.ra),
+            "dec_dms": format_dec(eq.dec),
+            "distance_au": geo.distance,
+            "distance_from_sun_au": helio.distance,
+        },
+        "rise_set": events,
+        "ephemeris": ephemeris,
+    });
+    println!("{}", serde_json::to_string_pretty(&json).unwrap());
 }
 
 // --- Helpers ---

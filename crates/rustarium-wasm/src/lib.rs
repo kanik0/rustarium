@@ -1,13 +1,19 @@
 use rustarium_core::bodies::{Body, Planet};
 use rustarium_core::coords::{format_dec, format_ra, GeoLocation};
+use rustarium_core::custom_body::CustomBody;
 use rustarium_core::eclipse::{lunar, solar};
 use rustarium_core::moon;
 use rustarium_core::planet;
 use rustarium_core::rise_set::{self, EventType};
+use rustarium_core::sbdb::SbdbResponse;
 use rustarium_core::sun;
 use rustarium_core::time::{date_from_jd, jd_from_date, JulianDay};
 use serde_json::{json, Value};
+use std::sync::Mutex;
 use wasm_bindgen::prelude::*;
+
+// Global state for custom bodies (safe: WASM is single-threaded)
+static CUSTOM_BODIES: Mutex<Vec<CustomBody>> = Mutex::new(Vec::new());
 
 fn parse_date(date_str: &str) -> JulianDay {
     let parts: Vec<&str> = date_str.split('-').collect();
@@ -141,6 +147,23 @@ pub fn sky(date_str: &str) -> String {
     let moon_ecl = moon::geocentric_ecliptic(jd);
     let earth_helio = planet::heliocentric_position(Planet::Earth, jd);
 
+    // Custom bodies
+    let custom_list = CUSTOM_BODIES.lock().unwrap_or_else(|e| e.into_inner());
+    let custom_entries: Vec<Value> = custom_list
+        .iter()
+        .map(|cb| {
+            let helio = cb.heliocentric_position(jd);
+            json!({
+                "name": cb.name,
+                "type": cb.body_type.name(),
+                "helio_lon_deg": helio.longitude.to_degrees(),
+                "helio_lat_deg": helio.latitude.to_degrees(),
+                "helio_distance_au": helio.distance,
+            })
+        })
+        .collect();
+    drop(custom_list);
+
     let result = json!({
         "date": jd_to_iso(jd),
         "julian_day": jd.0,
@@ -154,6 +177,7 @@ pub fn sky(date_str: &str) -> String {
             "earth_helio_lon_deg": earth_helio.longitude.to_degrees(),
         },
         "planets": planets,
+        "custom_bodies": custom_entries,
     });
 
     serde_json::to_string(&result).unwrap_or_default()
@@ -302,4 +326,144 @@ pub fn solar_eclipses(year: i32, range: u32) -> String {
         "eclipses": results,
     });
     serde_json::to_string(&result).unwrap_or_default()
+}
+
+// ===== Custom Body API =====
+
+#[wasm_bindgen]
+pub fn add_custom_body(sbdb_json: &str) -> String {
+    let resp: SbdbResponse = match serde_json::from_str(sbdb_json) {
+        Ok(r) => r,
+        Err(e) => return json!({"error": format!("invalid JSON: {}", e)}).to_string(),
+    };
+    let body = match resp.to_custom_body() {
+        Ok(b) => b,
+        Err(e) => return json!({"error": e}).to_string(),
+    };
+
+    let name = body.name.clone();
+    let body_type = body.body_type.name().to_string();
+    let a_au = body.elements.semi_major_axis_km / rustarium_core::bodies::AU_KM;
+    let e = body.elements.eccentricity;
+    let i_deg = body.elements.inclination_rad.to_degrees();
+    let om_deg = body.elements.longitude_ascending_node_rad.to_degrees();
+    let w_deg = body.elements.argument_perihelion_rad.to_degrees();
+    let diameter = body.diameter_km;
+
+    let mut list = CUSTOM_BODIES.lock().unwrap_or_else(|e| e.into_inner());
+    list.retain(|b| b.name != name);
+    list.push(body);
+    let count = list.len();
+    drop(list);
+
+    json!({
+        "ok": true,
+        "name": name,
+        "body_type": body_type,
+        "count": count,
+        "elements": { "a_au": a_au, "e": e, "i_deg": i_deg, "om_deg": om_deg, "w_deg": w_deg },
+        "diameter_km": diameter,
+    })
+    .to_string()
+}
+
+#[wasm_bindgen]
+pub fn remove_custom_body(name: &str) -> String {
+    let mut list = CUSTOM_BODIES.lock().unwrap_or_else(|e| e.into_inner());
+    let before = list.len();
+    list.retain(|b| b.name != name);
+    let removed = before - list.len();
+    drop(list);
+    json!({"ok": true, "removed": removed}).to_string()
+}
+
+#[wasm_bindgen]
+pub fn list_custom_bodies() -> String {
+    let list = CUSTOM_BODIES.lock().unwrap_or_else(|e| e.into_inner());
+    let entries: Vec<Value> = list
+        .iter()
+        .map(|b| {
+            json!({
+                "name": b.name,
+                "designation": b.designation,
+                "body_type": b.body_type.name(),
+                "epoch_jd": b.epoch_jd,
+                "diameter_km": b.diameter_km,
+            })
+        })
+        .collect();
+    serde_json::to_string(&entries).unwrap_or_default()
+}
+
+#[wasm_bindgen]
+pub fn custom_position(name: &str, date_str: &str) -> String {
+    let jd = parse_date(date_str);
+    let list = CUSTOM_BODIES.lock().unwrap_or_else(|e| e.into_inner());
+    let body = match list.iter().find(|b| b.name == name) {
+        Some(b) => b.clone(),
+        None => return json!({"error": "custom body not found"}).to_string(),
+    };
+    drop(list);
+
+    let eq = body.apparent_equatorial(jd);
+    let geo = body.geocentric_position(jd);
+    let helio = body.heliocentric_position(jd);
+
+    json!({
+        "date": jd_to_iso(jd),
+        "julian_day": jd.0,
+        "position": {
+            "body": body.name,
+            "body_type": body.body_type.name(),
+            "ra_hms": format_ra(eq.ra),
+            "dec_dms": format_dec(eq.dec),
+            "ra_deg": eq.ra.to_degrees(),
+            "dec_deg": eq.dec.to_degrees(),
+            "distance_au": geo.distance,
+            "distance_from_sun_au": helio.distance,
+            "diameter_km": body.diameter_km,
+        },
+    })
+    .to_string()
+}
+
+#[wasm_bindgen]
+pub fn custom_riseset(name: &str, date_str: &str, lat: f64, lon: f64) -> String {
+    let jd = parse_date(date_str);
+    let list = CUSTOM_BODIES.lock().unwrap_or_else(|e| e.into_inner());
+    let body = match list.iter().find(|b| b.name == name) {
+        Some(b) => b.clone(),
+        None => return json!({"error": "custom body not found"}).to_string(),
+    };
+    drop(list);
+
+    let loc = GeoLocation::from_degrees(lat, lon, 0.0);
+    let jd_0h = JulianDay((jd.0 - 0.5).floor() + 0.5);
+    let h0 = (-0.5667_f64).to_radians();
+    let eq_fn = |jd: JulianDay| body.apparent_equatorial(jd);
+
+    match rise_set::rise_transit_set_custom(jd_0h, &loc, h0, eq_fn) {
+        Ok(events) => {
+            let ev_json: Vec<Value> = events
+                .iter()
+                .map(|e| {
+                    json!({
+                        "event": match e.event {
+                            EventType::Rise => "rise",
+                            EventType::Transit => "transit",
+                            EventType::Set => "set",
+                        },
+                        "time_ut": jd_to_iso(e.jd),
+                        "julian_day": e.jd.0,
+                        "azimuth_deg": e.azimuth_deg,
+                        "altitude_deg": e.altitude_deg,
+                    })
+                })
+                .collect();
+            json!({"date": jd_to_iso(jd_0h), "body": body.name, "events": ev_json}).to_string()
+        }
+        Err(_) => {
+            json!({"date": jd_to_iso(jd_0h), "body": body.name, "events": []}).to_string()
+        }
+    }
 }

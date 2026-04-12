@@ -80,7 +80,38 @@
             <button class="planet-btn" data-body="moon" style="--color: #CCCCCC">
                 <span class="dot"></span> Moon
             </button>
+            <button class="planet-btn add-btn" id="btn-add-body" style="--color: #5b8def" title="Add celestial object">
+                <span class="dot">+</span> Add
+            </button>
         </nav>
+
+        <!-- Search modal -->
+        <div id="search-modal" class="modal hidden">
+            <div class="modal-content">
+                <button class="close-btn" id="close-search">&times;</button>
+                <h2>Add Celestial Object</h2>
+                <p class="modal-hint">Search by name, designation, or SPK-ID</p>
+                <div class="search-row">
+                    <input type="text" id="search-input" placeholder="e.g. Ceres, 2024 YR4, 1P/Halley" autocomplete="off" />
+                    <button id="btn-search">Search</button>
+                </div>
+                <div id="search-status" class="search-status hidden"></div>
+                <div id="search-result" class="search-result hidden">
+                    <div class="result-header">
+                        <span id="result-name" class="result-name"></span>
+                        <span id="result-type" class="result-badge"></span>
+                    </div>
+                    <div id="result-details" class="result-details"></div>
+                    <div class="result-actions">
+                        <button id="btn-add-result" class="btn-primary">Add to Orrery</button>
+                    </div>
+                </div>
+                <div class="tracked-list">
+                    <h3>Tracked Objects</h3>
+                    <div id="tracked-items"></div>
+                </div>
+            </div>
+        </div>
 
         <!-- Location widget -->
         <div id="location-widget" class="widget">

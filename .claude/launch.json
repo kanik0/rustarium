@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "rustarium-site",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["crates/rustarium-wasm/dev-server.mjs"],
+      "port": 3000
+    }
+  ]
+}

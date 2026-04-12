@@ -10,5 +10,6 @@ crate-type = ["cdylib"]
 rustarium-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+urlencoding = "2"
 worker = "0.7"
 

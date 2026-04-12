@@ -4,6 +4,7 @@ use rustarium_core::eclipse::{lunar, solar};
 use rustarium_core::moon;
 use rustarium_core::planet;
 use rustarium_core::rise_set::{self, EventType};
+use rustarium_core::sbdb::SbdbResponse;
 use rustarium_core::sun;
 use rustarium_core::time::{date_from_jd, jd_from_date, JulianDay};
 use serde_json::{json, Value};
@@ -26,6 +27,8 @@ async fn fetch(req: Request, _env: Env, _ctx: Context) -> Result<Response> {
         .get_async("/api/eclipse/lunar", handle_lunar_eclipses)
         .get_async("/api/eclipse/solar", handle_solar_eclipses)
         .get_async("/api/ephemeris/:body", handle_ephemeris)
+        .get_async("/api/sbdb/search", handle_sbdb_search)
+        .post_async("/api/custom/position", handle_custom_position)
         .run(req, _env)
         .await
 }
@@ -415,6 +418,86 @@ async fn handle_ephemeris(req: Request, ctx: RouteContext<()>) -> Result<Respons
         "days": days,
         "step": step,
         "entries": entries,
+    }))
+}
+
+async fn handle_sbdb_search(req: Request, _ctx: RouteContext<()>) -> Result<Response> {
+    let url = req.url()?;
+    let query = url
+        .query_pairs()
+        .find(|(k, _)| k == "sstr")
+        .map(|(_, v)| v.to_string())
+        .unwrap_or_default();
+
+    if query.is_empty() {
+        return Response::error("Missing 'sstr' parameter", 400);
+    }
+
+    let sbdb_url = format!(
+        "https://ssd-api.jpl.nasa.gov/sbdb.api?sstr={}&phys-par=true",
+        urlencoding::encode(&query)
+    );
+
+    let sbdb_req = Request::new(&sbdb_url, Method::Get)?;
+    let mut resp = Fetch::Request(sbdb_req).send().await?;
+    let body = resp.text().await?;
+
+    let headers = Headers::new();
+    headers.set("Content-Type", "application/json")?;
+    headers.set("Access-Control-Allow-Origin", "*")?;
+    Ok(Response::ok(body)?.with_headers(headers))
+}
+
+async fn handle_custom_position(mut req: Request, _ctx: RouteContext<()>) -> Result<Response> {
+    let body_text = req.text().await?;
+    let input: Value = serde_json::from_str(&body_text)
+        .map_err(|e| Error::RustError(format!("Invalid JSON: {}", e)))?;
+
+    // Parse SBDB data to create a CustomBody
+    let sbdb_json = input
+        .get("sbdb_data")
+        .ok_or_else(|| Error::RustError("missing sbdb_data".into()))?;
+    let resp: SbdbResponse = serde_json::from_value(sbdb_json.clone())
+        .map_err(|e| Error::RustError(format!("Invalid SBDB data: {}", e)))?;
+    let custom_body = resp
+        .to_custom_body()
+        .map_err(|e| Error::RustError(e))?;
+
+    // Parse date
+    let date_str = input
+        .get("date")
+        .and_then(|v| v.as_str())
+        .unwrap_or("2026-01-01");
+    let jd = {
+        let parts: Vec<&str> = date_str.split('-').collect();
+        if parts.len() == 3 {
+            let y = parts[0].parse::<i32>().unwrap_or(2026);
+            let m = parts[1].parse::<u32>().unwrap_or(1);
+            let d = parts[2].parse::<f64>().unwrap_or(1.0);
+            jd_from_date(y, m, d)
+        } else {
+            jd_from_date(2026, 1, 1.0)
+        }
+    };
+
+    let eq = custom_body.apparent_equatorial(jd);
+    let geo = custom_body.geocentric_position(jd);
+    let helio = custom_body.heliocentric_position(jd);
+
+    json_response(json!({
+        "date": jd_to_iso(jd),
+        "julian_day": jd.0,
+        "position": {
+            "body": custom_body.name,
+            "body_type": custom_body.body_type.name(),
+            "ra_hms": format_ra(eq.ra),
+            "dec_dms": format_dec(eq.dec),
+            "ra_deg": eq.ra.to_degrees(),
+            "dec_deg": eq.dec.to_degrees(),
+            "distance_au": geo.distance,
+            "distance_from_sun_au": helio.distance,
+            "diameter_km": custom_body.diameter_km,
+        },
     }))
 }
 

@@ -1,6 +1,10 @@
 // Client-side WASM API — calls Rust functions directly, no server needed.
 
-import init, { sky, position, moon_info, riseset, lunar_eclipses, solar_eclipses } from '../pkg/rustarium_wasm.js';
+import init, {
+    sky, position, moon_info, riseset, lunar_eclipses, solar_eclipses,
+    add_custom_body, remove_custom_body, list_custom_bodies,
+    custom_position, custom_riseset
+} from '../pkg/rustarium_wasm.js';
 
 let wasmReady = false;
 
@@ -49,5 +53,52 @@ export async function fetchLunarEclipses(year, range = 2) {
 export async function fetchSolarEclipses(year, range = 2) {
     if (!wasmReady) await initWasm();
     const json = solar_eclipses(year, range);
+    return JSON.parse(json);
+}
+
+// ===== Custom Bodies =====
+
+export async function searchSBDB(query) {
+    // Always proxy through same-origin to avoid CORS issues.
+    // Works on Cloudflare Worker (/api/sbdb/search) and local dev server (proxy).
+    const url = `/api/sbdb/search?sstr=${encodeURIComponent(query)}`;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 12000);
+    try {
+        const resp = await fetch(url, { signal: controller.signal });
+        if (!resp.ok) throw new Error(`SBDB search error: ${resp.status}`);
+        return await resp.json();
+    } finally {
+        clearTimeout(timeout);
+    }
+}
+
+export async function addCustomBody(sbdbJson) {
+    if (!wasmReady) await initWasm();
+    const json = add_custom_body(JSON.stringify(sbdbJson));
+    return JSON.parse(json);
+}
+
+export async function removeCustomBody(name) {
+    if (!wasmReady) await initWasm();
+    const json = remove_custom_body(name);
+    return JSON.parse(json);
+}
+
+export async function fetchCustomBodies() {
+    if (!wasmReady) await initWasm();
+    const json = list_custom_bodies();
+    return JSON.parse(json);
+}
+
+export async function fetchCustomPosition(name, date) {
+    if (!wasmReady) await initWasm();
+    const json = custom_position(name, formatDate(date));
+    return JSON.parse(json);
+}
+
+export async function fetchCustomRiseSet(name, date, lat, lon) {
+    if (!wasmReady) await initWasm();
+    const json = custom_riseset(name, formatDate(date), lat, lon);
     return JSON.parse(json);
 }
