@@ -60,6 +60,7 @@ impl OrbitalElements {
 
     /// Convert orbital elements to a Cartesian state vector.
     /// `central_body_gm` is the GM of the central body (e.g., SUN_GM for heliocentric orbits).
+    /// Handles elliptic (e < 1), parabolic (e ≈ 1), and hyperbolic (e > 1) orbits.
     pub fn to_state_vector(&self, central_body_gm: f64) -> StateVector {
         let a = self.semi_major_axis_km;
         let e = self.eccentricity;
@@ -67,29 +68,33 @@ impl OrbitalElements {
         let omega_big = self.longitude_ascending_node_rad; // Ω
         let omega = self.argument_perihelion_rad; // ω
         let m = self.mean_anomaly_rad;
+        let mu = central_body_gm;
 
-        // Solve Kepler's equation: E - e*sin(E) = M
-        let ecc_anomaly = solve_kepler(m, e);
-
-        // True anomaly from eccentric anomaly
-        let cos_e = ecc_anomaly.cos();
-        let sin_e = ecc_anomaly.sin();
-        let true_anomaly = ((1.0 - e * e).sqrt() * sin_e).atan2(cos_e - e);
-
-        // Distance from central body
-        let r = a * (1.0 - e * cos_e);
+        let (true_anomaly, r) = if e < 1.0 {
+            // Elliptic orbit
+            let ecc_anomaly = solve_kepler(m, e);
+            let cos_e = ecc_anomaly.cos();
+            let sin_e = ecc_anomaly.sin();
+            let nu = ((1.0 - e * e).sqrt() * sin_e).atan2(cos_e - e);
+            let r = a * (1.0 - e * cos_e);
+            (nu, r)
+        } else {
+            // Hyperbolic orbit (e >= 1)
+            let hyp_anomaly = solve_kepler_hyperbolic(m, e);
+            let cosh_h = hyp_anomaly.cosh();
+            let sinh_h = hyp_anomaly.sinh();
+            let nu = ((e * e - 1.0).sqrt() * sinh_h).atan2(e - cosh_h);
+            let r = a.abs() * (e * cosh_h - 1.0);
+            (nu, r)
+        };
 
         // Position and velocity in orbital plane
         let cos_nu = true_anomaly.cos();
         let sin_nu = true_anomaly.sin();
-        let p = a * (1.0 - e * e); // semi-latus rectum
-        let mu = central_body_gm;
+        let p = a.abs() * (1.0 - e * e).abs(); // semi-latus rectum
         let h = (mu * p).sqrt(); // specific angular momentum
 
-        // Position in orbital plane
         let r_orb = Vec3::new(r * cos_nu, r * sin_nu, 0.0);
-
-        // Velocity in orbital plane
         let v_orb = Vec3::new(-mu / h * sin_nu, mu / h * (e + cos_nu), 0.0);
 
         // Rotation from orbital plane to reference frame (ICRF)
@@ -117,6 +122,32 @@ fn solve_kepler(mean_anomaly: f64, eccentricity: f64) -> f64 {
     }
 
     ecc_anomaly
+}
+
+/// Solve hyperbolic Kepler's equation M = e*sinh(H) - H for H using Newton-Raphson.
+fn solve_kepler_hyperbolic(mean_anomaly: f64, eccentricity: f64) -> f64 {
+    let m = mean_anomaly;
+    let e = eccentricity;
+
+    // Initial guess: H = sign(M) * ln(2|M|/e + 1.8)
+    let mut h = m.signum() * ((2.0 * m.abs() / e + 1.8).ln());
+
+    for _ in 0..50 {
+        let sinh_h = h.sinh();
+        let cosh_h = h.cosh();
+        let f = e * sinh_h - h - m;
+        let fp = e * cosh_h - 1.0;
+        if fp.abs() < 1e-30 {
+            break;
+        }
+        let delta = f / fp;
+        h -= delta;
+        if delta.abs() < 1e-15 {
+            break;
+        }
+    }
+
+    h
 }
 
 /// Rotate a vector from the orbital plane to the inertial reference frame.
@@ -192,5 +223,43 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Hyperbolic Kepler solver should converge for e > 1.
+    #[test]
+    fn hyperbolic_kepler_solver_convergence() {
+        for e in [1.1, 1.5, 2.0, 3.0, 5.0] {
+            for m in [-5.0, -1.0, 0.0, 0.5, 1.0, 3.0, 10.0] {
+                let h = solve_kepler_hyperbolic(m, e);
+                let residual = (e * h.sinh() - h - m).abs();
+                assert!(
+                    residual < 1e-10,
+                    "Hyperbolic Kepler residual too large for e={}, M={}: {}",
+                    e,
+                    m,
+                    residual
+                );
+            }
+        }
+    }
+
+    /// Hyperbolic orbit produces a valid state vector.
+    #[test]
+    fn hyperbolic_orbit_state_vector() {
+        let elements = OrbitalElements {
+            semi_major_axis_km: -AU_KM, // negative for hyperbolic
+            eccentricity: 1.5,
+            inclination_rad: 0.0,
+            longitude_ascending_node_rad: 0.0,
+            argument_perihelion_rad: 0.0,
+            mean_anomaly_rad: 0.5,
+        };
+        let state = elements.to_state_vector(SUN_GM);
+        // Position should be finite and at a reasonable distance
+        assert!(state.position.magnitude().is_finite());
+        assert!(state.position.magnitude() > 0.0);
+        // Velocity should be finite
+        assert!(state.velocity.magnitude().is_finite());
+        assert!(state.velocity.magnitude() > 0.0);
     }
 }

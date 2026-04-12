@@ -166,6 +166,103 @@ pub fn rise_transit_set(
     Ok(events)
 }
 
+/// Compute rise, transit, and set times for a body with a custom standard altitude.
+/// Same algorithm as `rise_transit_set` but takes `h0` directly instead of a `Body` enum.
+/// Useful for custom bodies (asteroids, comets) that aren't in the `Body` enum.
+pub fn rise_transit_set_custom(
+    jd_0h_ut: JulianDay,
+    observer: &GeoLocation,
+    h0: f64,
+    equatorial_at: impl Fn(JulianDay) -> EquatorialCoords,
+) -> Result<Vec<RiseSetEvent>, RiseSetError> {
+    let eq_prev = equatorial_at(jd_0h_ut - 1.0);
+    let eq_curr = equatorial_at(jd_0h_ut);
+    let eq_next = equatorial_at(jd_0h_ut + 1.0);
+
+    let theta0 = greenwich_mean_sidereal_time(jd_0h_ut);
+
+    let cos_h0 = (h0.sin() - observer.lat.sin() * eq_curr.dec.sin())
+        / (observer.lat.cos() * eq_curr.dec.cos());
+
+    if cos_h0 < -1.0 {
+        return Err(RiseSetError::AlwaysAbove);
+    }
+    if cos_h0 > 1.0 {
+        return Err(RiseSetError::AlwaysBelow);
+    }
+
+    let h_rise_set = cos_h0.acos();
+
+    let m_transit = normalize_m((eq_curr.ra - observer.lon - theta0) / (2.0 * PI));
+    let m_rise = normalize_m(m_transit - h_rise_set / (2.0 * PI));
+    let m_set = normalize_m(m_transit + h_rise_set / (2.0 * PI));
+
+    let mut events = Vec::new();
+
+    for (event_type, m_init) in [
+        (EventType::Rise, m_rise),
+        (EventType::Transit, m_transit),
+        (EventType::Set, m_set),
+    ] {
+        let mut m = m_init;
+
+        for _ in 0..5 {
+            let ra = interpolate_angle(eq_prev.ra, eq_curr.ra, eq_next.ra, m);
+            let dec = interpolate(eq_prev.dec, eq_curr.dec, eq_next.dec, m);
+            let theta = theta0 + 6.300388092591991 * m;
+            let h = normalize_radians(theta + observer.lon - ra);
+            let h = if h > PI { h - 2.0 * PI } else { h };
+
+            if event_type == EventType::Transit {
+                let dm = -h / (2.0 * PI);
+                m += dm;
+                if dm.abs() < 1e-8 {
+                    break;
+                }
+            } else {
+                let alt = (observer.lat.sin() * dec.sin()
+                    + observer.lat.cos() * dec.cos() * h.cos())
+                .asin();
+                let dm = (alt - h0) / (2.0 * PI * dec.cos() * observer.lat.cos() * h.sin());
+                m += dm;
+                if dm.abs() < 1e-8 {
+                    break;
+                }
+            }
+        }
+
+        if m >= -0.01 && m <= 1.01 {
+            let jd = jd_0h_ut + m;
+            let (azimuth_deg, altitude_deg) = if event_type == EventType::Transit {
+                let eq = equatorial_at(jd);
+                let lst = observer::local_mean_sidereal_time(jd, observer);
+                let ha = observer::hour_angle(lst, eq.ra);
+                let hz = equatorial_to_horizontal(&eq, ha, observer.lat);
+                (None, Some(hz.altitude.to_degrees()))
+            } else {
+                let eq = equatorial_at(jd);
+                let lst = observer::local_mean_sidereal_time(jd, observer);
+                let ha = observer::hour_angle(lst, eq.ra);
+                let hz = equatorial_to_horizontal(&eq, ha, observer.lat);
+                (Some(hz.azimuth.to_degrees()), None)
+            };
+
+            events.push(RiseSetEvent {
+                event: event_type,
+                jd: JulianDay(jd.0),
+                azimuth_deg,
+                altitude_deg,
+            });
+        }
+    }
+
+    if events.is_empty() {
+        return Err(RiseSetError::NoConvergence);
+    }
+
+    Ok(events)
+}
+
 /// Normalize m to [0, 1)
 fn normalize_m(mut m: f64) -> f64 {
     while m < 0.0 {
