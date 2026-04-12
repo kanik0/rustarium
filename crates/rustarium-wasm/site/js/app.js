@@ -47,8 +47,12 @@ const CUSTOM_BODY_COLORS = {
     'Comet':        0x66CCFF,
     'Dwarf Planet': 0xCC88DD,
     'TNO':          0x99AACC,
+    'Spacecraft':   0xFF6633,
     'Unknown':      0xAAAA88,
 };
+
+let spacecraftCatalogCache = null; // loaded once
+let selectedSpacecraftEntry = null;
 
 function init() {
     const canvas = document.getElementById('solar-system');
@@ -266,6 +270,10 @@ function removeCustomBodyMesh(name) {
 }
 
 function createCustomOrbitLine(body) {
+    // Spacecraft: draw trail from ephemeris points
+    if (body.body_type === 'Spacecraft' && body.ephemeris_points) {
+        return createSpacecraftTrail(body);
+    }
     const el = body.elements;
     if (!el || !el.a_au) return null;
     const a = el.a_au;
@@ -321,6 +329,31 @@ function rotateOrbitalPoint(nu, omegaRad, r, incRad, nodeRad) {
     const x3 = x1 * cosN2 - z2 * sinN2;
     const z3 = x1 * sinN2 + z2 * cosN2;
     return [x3, y2, z3];
+}
+
+function createSpacecraftTrail(body) {
+    const points = body.ephemeris_points;
+    if (!points || points.length < 2) return null;
+    const pts = [];
+    for (const p of points) {
+        // Convert heliocentric ecliptic (x,y,z in AU) to 3D scene coords
+        // x,y,z from Horizons are ecliptic: x toward vernal equinox, z toward ecliptic pole
+        const dist = Math.sqrt(p.x * p.x + p.y * p.y + p.z * p.z);
+        const s = scaleDistance(dist);
+        const lon = Math.atan2(p.y, p.x);
+        const lat = Math.asin(p.z / dist);
+        const cosLat = Math.cos(lat);
+        pts.push(new THREE.Vector3(
+            s * cosLat * Math.cos(lon),
+            s * Math.sin(lat) * 3.0,
+            -s * cosLat * Math.sin(lon)
+        ));
+    }
+    const color = CUSTOM_BODY_COLORS['Spacecraft'];
+    return new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints(pts),
+        new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.5 })
+    );
 }
 
 function addCustomBodyButton(body) {
@@ -566,6 +599,8 @@ async function refreshPanel(bodyName) {
         else if (pos.distance_km) addRow(el, 'Distance', `${Math.round(pos.distance_km).toLocaleString()} km`);
         if (pos.distance_from_sun_au) addRow(el, 'From Sun', `${pos.distance_from_sun_au.toFixed(4)} AU`);
         if (pos.diameter_km) addRow(el, 'Diameter', `${pos.diameter_km.toFixed(1)} km`);
+        if (pos.velocity_km_s) addRow(el, 'Velocity', `${pos.velocity_km_s.toFixed(2)} km/s`);
+        if (pos.light_hours) addRow(el, 'Light-time', `${pos.light_hours.toFixed(2)} hours`);
         if (pos.illumination !== undefined) {
             addSection(el, 'Phase');
             addRow(el, 'Illumination', `${(pos.illumination * 100).toFixed(1)}%`);
@@ -716,6 +751,8 @@ function cap(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
 
 let lastSearchResult = null;
 
+let searchMode = 'sbdb'; // 'sbdb' or 'spacecraft'
+
 function setupSearchDialog() {
     const addBtn = document.getElementById('btn-add-body');
     if (!addBtn) return;
@@ -727,6 +764,25 @@ function setupSearchDialog() {
     });
     document.getElementById('btn-add-result').addEventListener('click', addSearchResult);
 
+    // Mode tabs
+    document.querySelectorAll('.search-mode').forEach(btn => {
+        btn.addEventListener('click', () => {
+            searchMode = btn.dataset.mode;
+            document.querySelectorAll('.search-mode').forEach(b => b.classList.toggle('active', b.dataset.mode === searchMode));
+            document.getElementById('sbdb-search').classList.toggle('hidden', searchMode !== 'sbdb');
+            document.getElementById('spacecraft-search').classList.toggle('hidden', searchMode !== 'spacecraft');
+            document.getElementById('search-result').classList.add('hidden');
+            document.getElementById('search-status').classList.add('hidden');
+            if (searchMode === 'spacecraft') loadSpacecraftCatalog();
+        });
+    });
+
+    // Spacecraft filter
+    const filter = document.getElementById('spacecraft-filter');
+    if (filter) {
+        filter.addEventListener('input', () => filterSpacecraftList(filter.value));
+    }
+
     // Close on background click
     document.getElementById('search-modal').addEventListener('click', e => {
         if (e.target.id === 'search-modal') closeSearchModal();
@@ -735,8 +791,69 @@ function setupSearchDialog() {
 
 function openSearchModal() {
     document.getElementById('search-modal').classList.remove('hidden');
-    document.getElementById('search-input').focus();
+    if (searchMode === 'sbdb') {
+        document.getElementById('search-input').focus();
+    } else {
+        loadSpacecraftCatalog();
+    }
     updateTrackedList();
+}
+
+async function loadSpacecraftCatalog() {
+    if (!spacecraftCatalogCache) {
+        spacecraftCatalogCache = await api.getSpacecraftCatalog();
+    }
+    filterSpacecraftList('');
+}
+
+function filterSpacecraftList(query) {
+    const list = document.getElementById('spacecraft-list');
+    if (!list || !spacecraftCatalogCache) return;
+    list.textContent = '';
+    const q = query.toLowerCase().trim();
+    const filtered = q
+        ? spacecraftCatalogCache.filter(e => e.name.toLowerCase().includes(q) || e.description.toLowerCase().includes(q))
+        : spacecraftCatalogCache;
+    for (const entry of filtered) {
+        const item = document.createElement('div');
+        item.className = 'spacecraft-item';
+        item.addEventListener('click', () => selectSpacecraftEntry(entry));
+
+        const left = document.createElement('div');
+        const nameEl = document.createElement('div');
+        nameEl.className = 'spacecraft-name';
+        nameEl.textContent = entry.name;
+        const descEl = document.createElement('div');
+        descEl.className = 'spacecraft-desc';
+        descEl.textContent = entry.description;
+        left.appendChild(nameEl);
+        left.appendChild(descEl);
+
+        const statusEl = document.createElement('span');
+        statusEl.className = 'spacecraft-status ' + (entry.status === 'Active' ? 'active-status' : 'completed-status');
+        statusEl.textContent = entry.status;
+
+        item.appendChild(left);
+        item.appendChild(statusEl);
+        list.appendChild(item);
+    }
+}
+
+function selectSpacecraftEntry(entry) {
+    selectedSpacecraftEntry = entry;
+    document.querySelectorAll('.spacecraft-item').forEach(el => el.classList.remove('selected'));
+    // Show result card
+    document.getElementById('search-status').classList.add('hidden');
+    const resultEl = document.getElementById('search-result');
+    resultEl.classList.remove('hidden');
+    document.getElementById('result-name').textContent = entry.name;
+    document.getElementById('result-type').textContent = 'Spacecraft';
+    const details = document.getElementById('result-details');
+    details.textContent = '';
+    addDetailRow(details, 'Horizons ID', entry.horizons_id);
+    addDetailRow(details, 'Launched', String(entry.launch_year));
+    addDetailRow(details, 'Status', entry.status);
+    addDetailRow(details, 'Mission', entry.description);
 }
 
 function closeSearchModal() {
@@ -810,6 +927,10 @@ function addDetailRow(parent, label, value) {
 }
 
 async function addSearchResult() {
+    if (searchMode === 'spacecraft') {
+        await addSpacecraftResult();
+        return;
+    }
     if (!lastSearchResult) return;
     const result = await api.addCustomBody(lastSearchResult);
     if (result.error) {
@@ -828,7 +949,6 @@ async function addSearchResult() {
     addCustomBodyMesh(body);
     saveCustomBodiesToStorage();
 
-    // Refresh to get position
     try {
         const skyData = await api.fetchSky(currentDate);
         setTargetPositions(skyData);
@@ -840,6 +960,46 @@ async function addSearchResult() {
     document.getElementById('search-result').classList.add('hidden');
     document.getElementById('search-input').value = '';
     showSearchStatus(`${body.name} added to orrery!`);
+}
+
+async function addSpacecraftResult() {
+    if (!selectedSpacecraftEntry) return;
+    const entry = selectedSpacecraftEntry;
+    showSearchStatus(`Fetching trajectory for ${entry.name} from JPL Horizons...`);
+
+    try {
+        const horizonsData = await api.fetchHorizons(entry.horizons_id);
+        const result = await api.addSpacecraft(entry.name, entry.horizons_id, horizonsData);
+        if (result.error) {
+            showSearchStatus(result.error, true);
+            return;
+        }
+
+        const body = {
+            name: result.name,
+            body_type: 'Spacecraft',
+            elements: null,
+            diameter_km: null,
+            horizons_id: entry.horizons_id,
+            horizons_data: horizonsData,
+        };
+        customBodies[body.name] = body;
+        addCustomBodyMesh(body);
+        saveCustomBodiesToStorage();
+
+        try {
+            const skyData = await api.fetchSky(currentDate);
+            setTargetPositions(skyData);
+            interpolatePositions(1.0);
+        } catch (_) {}
+
+        updateTrackedList();
+        selectedSpacecraftEntry = null;
+        document.getElementById('search-result').classList.add('hidden');
+        showSearchStatus(`${body.name} added to orrery! (${result.ephemeris_points} trajectory points)`);
+    } catch (err) {
+        showSearchStatus(err.name === 'AbortError' ? 'Request timed out. JPL Horizons may be slow.' : `Error: ${err.message}`, true);
+    }
 }
 
 function updateTrackedList() {
@@ -893,6 +1053,8 @@ function saveCustomBodiesToStorage() {
             elements: b.elements,
             diameter_km: b.diameter_km,
             sbdb_data: b.sbdb_data,
+            horizons_id: b.horizons_id,
+            horizons_data: b.horizons_data,
         }));
         localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
     } catch (_) {}
@@ -904,18 +1066,34 @@ async function loadCustomBodiesFromStorage() {
         if (!stored) return;
         const bodies = JSON.parse(stored);
         for (const b of bodies) {
-            if (!b.sbdb_data) continue;
-            const result = await api.addCustomBody(b.sbdb_data);
-            if (result.error) continue;
-            const body = {
-                name: result.name,
-                body_type: result.body_type || b.body_type || 'Unknown',
-                elements: result.elements || b.elements,
-                diameter_km: result.diameter_km || b.diameter_km,
-                sbdb_data: b.sbdb_data,
-            };
-            customBodies[body.name] = body;
-            addCustomBodyMesh(body);
+            if (b.horizons_data && b.horizons_id) {
+                // Spacecraft — restore from Horizons data
+                const result = await api.addSpacecraft(b.name, b.horizons_id, b.horizons_data);
+                if (result.error) continue;
+                const body = {
+                    name: result.name,
+                    body_type: 'Spacecraft',
+                    elements: null,
+                    diameter_km: null,
+                    horizons_id: b.horizons_id,
+                    horizons_data: b.horizons_data,
+                };
+                customBodies[body.name] = body;
+                addCustomBodyMesh(body);
+            } else if (b.sbdb_data) {
+                // Asteroid/comet — restore from SBDB data
+                const result = await api.addCustomBody(b.sbdb_data);
+                if (result.error) continue;
+                const body = {
+                    name: result.name,
+                    body_type: result.body_type || b.body_type || 'Unknown',
+                    elements: result.elements || b.elements,
+                    diameter_km: result.diameter_km || b.diameter_km,
+                    sbdb_data: b.sbdb_data,
+                };
+                customBodies[body.name] = body;
+                addCustomBodyMesh(body);
+            }
         }
     } catch (_) {}
 }

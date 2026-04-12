@@ -31,13 +31,15 @@ fn test_body(title: &str, sbdb_json: &str) {
     println!("  Name:        {}", body.name);
     println!("  Type:        {}", body.body_type.name());
     println!("  Designation: {}", body.designation.as_deref().unwrap_or("-"));
-    println!("  Epoch JD:    {:.1}", body.epoch_jd);
-    println!(
-        "  a = {:.4} AU, e = {:.6}, i = {:.2}°",
-        body.elements.semi_major_axis_km / rustarium_core::bodies::AU_KM,
-        body.elements.eccentricity,
-        body.elements.inclination_rad.to_degrees()
-    );
+    println!("  Epoch JD:    {:.1}", body.epoch_jd());
+    if let Some(el) = body.elements() {
+        println!(
+            "  a = {:.4} AU, e = {:.6}, i = {:.2}°",
+            el.semi_major_axis_km / rustarium_core::bodies::AU_KM,
+            el.eccentricity,
+            el.inclination_rad.to_degrees()
+        );
+    }
     if let Some(d) = body.diameter_km {
         println!("  Diameter:    {:.1} km", d);
     }

@@ -1,7 +1,8 @@
-use rustarium_core::bodies::{Body, Planet};
+use rustarium_core::bodies::{Body, Planet, AU_KM};
 use rustarium_core::coords::{format_dec, format_ra, GeoLocation};
 use rustarium_core::custom_body::CustomBody;
 use rustarium_core::eclipse::{lunar, solar};
+use rustarium_core::horizons::{self, HorizonsResponse};
 use rustarium_core::moon;
 use rustarium_core::planet;
 use rustarium_core::rise_set::{self, EventType};
@@ -343,12 +344,13 @@ pub fn add_custom_body(sbdb_json: &str) -> String {
 
     let name = body.name.clone();
     let body_type = body.body_type.name().to_string();
-    let a_au = body.elements.semi_major_axis_km / rustarium_core::bodies::AU_KM;
-    let e = body.elements.eccentricity;
-    let i_deg = body.elements.inclination_rad.to_degrees();
-    let om_deg = body.elements.longitude_ascending_node_rad.to_degrees();
-    let w_deg = body.elements.argument_perihelion_rad.to_degrees();
     let diameter = body.diameter_km;
+    let elements_json = if let Some(el) = body.elements() {
+        let a_au = el.semi_major_axis_km / rustarium_core::bodies::AU_KM;
+        json!({ "a_au": a_au, "e": el.eccentricity, "i_deg": el.inclination_rad.to_degrees(), "om_deg": el.longitude_ascending_node_rad.to_degrees(), "w_deg": el.argument_perihelion_rad.to_degrees() })
+    } else {
+        json!(null)
+    };
 
     let mut list = CUSTOM_BODIES.lock().unwrap_or_else(|e| e.into_inner());
     list.retain(|b| b.name != name);
@@ -361,7 +363,7 @@ pub fn add_custom_body(sbdb_json: &str) -> String {
         "name": name,
         "body_type": body_type,
         "count": count,
-        "elements": { "a_au": a_au, "e": e, "i_deg": i_deg, "om_deg": om_deg, "w_deg": w_deg },
+        "elements": elements_json,
         "diameter_km": diameter,
     })
     .to_string()
@@ -387,7 +389,7 @@ pub fn list_custom_bodies() -> String {
                 "name": b.name,
                 "designation": b.designation,
                 "body_type": b.body_type.name(),
-                "epoch_jd": b.epoch_jd,
+                "epoch_jd": b.epoch_jd(),
                 "diameter_km": b.diameter_km,
             })
         })
@@ -409,6 +411,15 @@ pub fn custom_position(name: &str, date_str: &str) -> String {
     let geo = body.geocentric_position(jd);
     let helio = body.heliocentric_position(jd);
 
+    // Velocity for spacecraft
+    let velocity_km_s = body.velocity_au_day(jd).map(|(vx, vy, vz)| {
+        let au_day_to_km_s = AU_KM / 86400.0;
+        let speed = ((vx * vx + vy * vy + vz * vz).sqrt()) * au_day_to_km_s;
+        speed
+    });
+    // Distance in light-hours
+    let light_hours = geo.distance * AU_KM / (299792.458 * 3600.0);
+
     json!({
         "date": jd_to_iso(jd),
         "julian_day": jd.0,
@@ -422,6 +433,9 @@ pub fn custom_position(name: &str, date_str: &str) -> String {
             "distance_au": geo.distance,
             "distance_from_sun_au": helio.distance,
             "diameter_km": body.diameter_km,
+            "velocity_km_s": velocity_km_s,
+            "light_hours": light_hours,
+            "horizons_id": body.horizons_id,
         },
     })
     .to_string()
@@ -466,4 +480,95 @@ pub fn custom_riseset(name: &str, date_str: &str, lat: f64, lon: f64) -> String 
             json!({"date": jd_to_iso(jd_0h), "body": body.name, "events": []}).to_string()
         }
     }
+}
+
+// ===== Spacecraft API =====
+
+#[wasm_bindgen]
+pub fn spacecraft_catalog() -> String {
+    let entries: Vec<Value> = horizons::SPACECRAFT_CATALOG
+        .iter()
+        .map(|e| {
+            json!({
+                "name": e.name,
+                "horizons_id": e.horizons_id,
+                "description": e.description,
+                "launch_year": e.launch_year,
+                "status": e.status,
+            })
+        })
+        .collect();
+    serde_json::to_string(&entries).unwrap_or_default()
+}
+
+#[wasm_bindgen]
+pub fn spacecraft_search(query: &str) -> String {
+    let results = horizons::search_catalog(query);
+    let entries: Vec<Value> = results
+        .iter()
+        .map(|e| {
+            json!({
+                "name": e.name,
+                "horizons_id": e.horizons_id,
+                "description": e.description,
+                "launch_year": e.launch_year,
+                "status": e.status,
+            })
+        })
+        .collect();
+    serde_json::to_string(&entries).unwrap_or_default()
+}
+
+#[wasm_bindgen]
+pub fn add_spacecraft(horizons_json: &str) -> String {
+    // Expect JSON with { result, name, horizons_id }
+    let input: Value = match serde_json::from_str(horizons_json) {
+        Ok(v) => v,
+        Err(e) => return json!({"error": format!("invalid JSON: {}", e)}).to_string(),
+    };
+
+    let name = input
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Unknown");
+    let horizons_id = input
+        .get("horizons_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    // Parse Horizons response nested under "horizons_response"
+    let resp: HorizonsResponse = match serde_json::from_value(
+        input
+            .get("horizons_response")
+            .cloned()
+            .unwrap_or(input.clone()),
+    ) {
+        Ok(r) => r,
+        Err(e) => return json!({"error": format!("invalid Horizons data: {}", e)}).to_string(),
+    };
+
+    let catalog_entry = horizons::search_catalog(name).into_iter().next();
+    let body = match resp.to_custom_body(name, horizons_id, catalog_entry) {
+        Ok(b) => b,
+        Err(e) => return json!({"error": e}).to_string(),
+    };
+
+    let body_name = body.name.clone();
+    let body_type = body.body_type.name().to_string();
+    let point_count = body.ephemeris_table().map(|t| t.len()).unwrap_or(0);
+
+    let mut list = CUSTOM_BODIES.lock().unwrap_or_else(|e| e.into_inner());
+    list.retain(|b| b.name != body_name);
+    list.push(body);
+    let count = list.len();
+    drop(list);
+
+    json!({
+        "ok": true,
+        "name": body_name,
+        "body_type": body_type,
+        "count": count,
+        "ephemeris_points": point_count,
+    })
+    .to_string()
 }

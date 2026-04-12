@@ -13,6 +13,7 @@
 - **N-body simulation** — gravitational simulation with Dormand-Prince RK45 and Wisdom-Holman symplectic integrators
 - **Custom objects** — add asteroids, comets, or spacecraft via orbital elements or state vectors
 - **Track any small body** — search NASA JPL's Small-Body Database by name, designation, or SPK-ID and track asteroids, comets, and dwarf planets on the fly
+- **Spacecraft tracking** — track Voyager 1/2, JWST, New Horizons, Parker Solar Probe and other missions using JPL Horizons ephemeris data, with trajectory trail visualization
 - **3D visualization** — Three.js orrery with real orbital elements, inclinations, and eccentricities
 - **CLI** — beautiful command-line interface with colored output, timezone support, and multiple output formats
 
@@ -29,6 +30,7 @@ cargo run -p rustarium-cli -- moon --calendar
 cargo run -p rustarium-cli -- eclipse lunar --year 2025
 cargo run -p rustarium-cli -- ephemeris jupiter --days 30
 cargo run -p rustarium-cli -- track Ceres --city roma  # Track an asteroid
+cargo run -p rustarium-cli -- track "Voyager 1"        # Track a spacecraft
 ```
 
 ### Web (Client-Side WASM)
@@ -43,7 +45,7 @@ node dev-server.mjs
 # Open http://localhost:3000
 ```
 
-The dev server serves static files and proxies `/api/sbdb/search` requests to NASA JPL's Small-Body Database API (required because the SBDB API does not support CORS).
+The dev server serves static files and proxies JPL API requests (`/api/sbdb/search` for asteroids, `/api/horizons/vectors` for spacecraft) since these APIs do not support CORS.
 
 ### Deploy to Cloudflare Workers
 
@@ -52,7 +54,7 @@ cd crates/rustarium-web
 npx wrangler deploy
 ```
 
-The Worker serves the API endpoints and proxies SBDB requests via `/api/sbdb/search`.
+The Worker serves the API endpoints and proxies JPL requests (`/api/sbdb/search` and `/api/horizons/vectors`).
 
 ## Architecture
 
@@ -87,8 +89,9 @@ The core library is the heart of the project. It compiles to both native and `wa
 | `rise_set` | Rise/transit/set calculations |
 | `eclipse` | Lunar and solar eclipse prediction |
 | `nbody` | N-body simulation (RK45 + symplectic integrators) |
-| `custom_body` | Keplerian propagation for asteroids, comets, dwarf planets |
+| `custom_body` | Keplerian propagation and ephemeris interpolation for tracked objects |
 | `sbdb` | NASA JPL Small-Body Database response parser |
+| `horizons` | NASA JPL Horizons response parser + spacecraft catalog |
 
 ### Data Sources
 
@@ -102,6 +105,7 @@ All data is embedded in the source code — no external files are downloaded at 
 | Nutation | IAU 2000B (77 lunisolar terms) | Continuous |
 | Asteroid state vectors | JPL Horizons API (DE441) | J2000.0 |
 | Custom body elements | JPL Small-Body Database API (fetched on demand) | Osculating epoch |
+| Spacecraft trajectories | JPL Horizons API (fetched on demand) | Ephemeris table |
 
 ### Precision
 
@@ -155,6 +159,11 @@ rustarium track Ceres --city roma
 rustarium track 99942 --days 60 --step 5        # Apophis by SPK-ID
 rustarium track 1P                               # Halley's Comet
 rustarium track "2024 YR4" --json               # JSON output
+
+# Track spacecraft (fetches from JPL Horizons)
+rustarium track "Voyager 1"                      # auto-detected from catalog
+rustarium track JWST --city roma                 # JWST from Rome
+rustarium track parker --days 60 --step 5        # Parker Solar Probe
 ```
 
 The CLI supports city names in Italian (roma, milano, napoli, giove, marte, luna...) and displays times in local timezone with UT in parentheses.
@@ -173,21 +182,29 @@ When deployed as a Cloudflare Worker (`rustarium-web`):
 | `GET /api/eclipse/solar?year=2025&range=2` | Solar eclipse search |
 | `GET /api/ephemeris/:body?date=...&days=30&step=1` | Multi-day ephemeris |
 | `GET /api/sbdb/search?sstr=Ceres` | Search JPL Small-Body Database (proxy) |
+| `GET /api/horizons/vectors?id=-31` | Fetch spacecraft trajectory from JPL Horizons (proxy) |
 | `POST /api/custom/position` | Compute position from orbital elements |
 
 ## Tracking Custom Objects
 
 ### CLI — search by name
 
-The `track` command fetches orbital data from NASA JPL's Small-Body Database and displays position, rise/set times, and an ephemeris table:
+The `track` command fetches data from NASA JPL and displays position, rise/set times, and an ephemeris table:
 
 ```bash
-rustarium track Ceres --city roma
+rustarium track Ceres --city roma           # Asteroid (via SBDB)
+rustarium track "Voyager 1"                  # Spacecraft (via Horizons, auto-detected)
 ```
+
+Spacecraft are auto-detected from a built-in catalog of known missions. The `--spacecraft` flag can force the Horizons path.
 
 ### Web — add to the 3D orrery
 
-Click the **"+ Add"** button in the bottom bar, search for any asteroid, comet, or dwarf planet, and click "Add to Orrery". The object appears in the 3D scene with its orbit, and its position updates in real time. Tracked objects persist across page reloads via localStorage.
+Click the **"+ Add"** button in the bottom bar:
+- **Asteroids & Comets** tab — search by name/designation on JPL SBDB, objects render with Keplerian orbit ellipses
+- **Spacecraft** tab — browse the catalog of known missions (Voyager, JWST, Parker, etc.), trajectories render as trail polylines from Horizons ephemeris data
+
+Tracked objects persist across page reloads via localStorage. The info panel shows velocity (km/s) and light-time (hours) for spacecraft.
 
 ### Rust library — N-body simulation
 
@@ -216,7 +233,7 @@ system.propagate_to(target_jd, Some(1.0));
 For quick position lookups without full N-body simulation:
 
 ```rust
-use rustarium_core::custom_body::{CustomBody, SmallBodyType};
+use rustarium_core::custom_body::{CustomBody, PropagationMethod, SmallBodyType};
 use rustarium_core::nbody::orbital_elements::OrbitalElements;
 use rustarium_core::time::jd_from_date;
 
@@ -224,11 +241,14 @@ let body = CustomBody {
     name: "Ceres".into(),
     designation: Some("1".into()),
     body_type: SmallBodyType::DwarfPlanet,
-    elements: OrbitalElements::from_au_and_degrees(2.766, 0.0796, 10.59, 80.31, 73.60, 130.0),
-    epoch_jd: 2460600.5,
+    propagation: PropagationMethod::Keplerian {
+        elements: OrbitalElements::from_au_and_degrees(2.766, 0.0796, 10.59, 80.31, 73.60, 130.0),
+        epoch_jd: 2460600.5,
+    },
     gm: 62.6284,
     diameter_km: Some(939.4),
     abs_magnitude_h: Some(3.33),
+    horizons_id: None,
 };
 
 let jd = jd_from_date(2026, 4, 12.0);

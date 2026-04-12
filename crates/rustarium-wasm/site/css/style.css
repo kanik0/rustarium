@@ -374,11 +374,62 @@ canvas#solar-system {
     font-size: 18px;
     margin-bottom: 4px;
 }
+.search-mode-tabs {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 16px;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 8px;
+}
+.search-mode {
+    background: none;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    color: var(--text-dim);
+    padding: 5px 12px;
+    font-size: 12px;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+.search-mode:hover { color: var(--text); }
+.search-mode.active {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: rgba(91,141,239,0.08);
+}
+.search-content.hidden { display: none; }
 .modal-hint {
     font-size: 12px;
     color: var(--text-dim);
     margin-bottom: 16px;
 }
+#spacecraft-list {
+    max-height: 200px;
+    overflow-y: auto;
+    margin-bottom: 12px;
+}
+.spacecraft-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+    transition: background 0.1s;
+    border-radius: 4px;
+}
+.spacecraft-item:hover { background: rgba(255,255,255,0.04); }
+.spacecraft-item.selected { background: rgba(91,141,239,0.12); border-color: var(--accent); }
+.spacecraft-name { font-weight: 600; font-size: 13px; }
+.spacecraft-desc { font-size: 11px; color: var(--text-dim); }
+.spacecraft-status {
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    background: rgba(255,255,255,0.06);
+}
+.spacecraft-status.active-status { color: #66ff88; background: rgba(102,255,136,0.08); }
+.spacecraft-status.completed-status { color: var(--text-dim); }
 .search-row {
     display: flex;
     gap: 8px;
