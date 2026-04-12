@@ -28,6 +28,7 @@ async fn fetch(req: Request, _env: Env, _ctx: Context) -> Result<Response> {
         .get_async("/api/eclipse/solar", handle_solar_eclipses)
         .get_async("/api/ephemeris/:body", handle_ephemeris)
         .get_async("/api/sbdb/search", handle_sbdb_search)
+        .get_async("/api/horizons/vectors", handle_horizons_vectors)
         .post_async("/api/custom/position", handle_custom_position)
         .run(req, _env)
         .await
@@ -440,6 +441,57 @@ async fn handle_sbdb_search(req: Request, _ctx: RouteContext<()>) -> Result<Resp
 
     let sbdb_req = Request::new(&sbdb_url, Method::Get)?;
     let mut resp = Fetch::Request(sbdb_req).send().await?;
+    let body = resp.text().await?;
+
+    let headers = Headers::new();
+    headers.set("Content-Type", "application/json")?;
+    headers.set("Access-Control-Allow-Origin", "*")?;
+    Ok(Response::ok(body)?.with_headers(headers))
+}
+
+async fn handle_horizons_vectors(req: Request, _ctx: RouteContext<()>) -> Result<Response> {
+    let url = req.url()?;
+    let id = url
+        .query_pairs()
+        .find(|(k, _)| k == "id")
+        .map(|(_, v)| v.to_string())
+        .unwrap_or_default();
+
+    if id.is_empty() {
+        return Response::error("Missing 'id' parameter", 400);
+    }
+
+    let start = url
+        .query_pairs()
+        .find(|(k, _)| k == "start")
+        .map(|(_, v)| v.to_string())
+        .unwrap_or_else(|| "2025-01-01".into());
+    let stop = url
+        .query_pairs()
+        .find(|(k, _)| k == "stop")
+        .map(|(_, v)| v.to_string())
+        .unwrap_or_else(|| "2027-01-01".into());
+    let step = url
+        .query_pairs()
+        .find(|(k, _)| k == "step")
+        .map(|(_, v)| v.to_string())
+        .unwrap_or_else(|| "5d".into());
+
+    let horizons_url = format!(
+        "https://ssd.jpl.nasa.gov/api/horizons.api?format=json\
+        &COMMAND='{}'\
+        &OBJ_DATA='YES'&MAKE_EPHEM='YES'&EPHEM_TYPE='VECTORS'\
+        &CENTER='500@10'&START_TIME='{}'\
+        &STOP_TIME='{}'&STEP_SIZE='{}'\
+        &REF_PLANE='ECLIPTIC'&REF_SYSTEM='ICRF'&OUT_UNITS='AU-D'",
+        urlencoding::encode(&id),
+        urlencoding::encode(&start),
+        urlencoding::encode(&stop),
+        urlencoding::encode(&step),
+    );
+
+    let h_req = Request::new(&horizons_url, Method::Get)?;
+    let mut resp = Fetch::Request(h_req).send().await?;
     let body = resp.text().await?;
 
     let headers = Headers::new();

@@ -18,4 +18,5 @@ pub mod eclipse;
 pub mod precision_roadmap;
 
 pub mod custom_body;
+pub mod horizons;
 pub mod sbdb;

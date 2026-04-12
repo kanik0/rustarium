@@ -3,7 +3,8 @@
 import init, {
     sky, position, moon_info, riseset, lunar_eclipses, solar_eclipses,
     add_custom_body, remove_custom_body, list_custom_bodies,
-    custom_position, custom_riseset
+    custom_position, custom_riseset,
+    spacecraft_catalog, spacecraft_search, add_spacecraft
 } from '../pkg/rustarium_wasm.js';
 
 let wasmReady = false;
@@ -100,5 +101,37 @@ export async function fetchCustomPosition(name, date) {
 export async function fetchCustomRiseSet(name, date, lat, lon) {
     if (!wasmReady) await initWasm();
     const json = custom_riseset(name, formatDate(date), lat, lon);
+    return JSON.parse(json);
+}
+
+// ===== Spacecraft =====
+
+export async function getSpacecraftCatalog() {
+    if (!wasmReady) await initWasm();
+    return JSON.parse(spacecraft_catalog());
+}
+
+export async function searchSpacecraftCatalog(query) {
+    if (!wasmReady) await initWasm();
+    return JSON.parse(spacecraft_search(query));
+}
+
+export async function fetchHorizons(horizonsId) {
+    const url = `/api/horizons/vectors?id=${encodeURIComponent(horizonsId)}`;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 20000);
+    try {
+        const resp = await fetch(url, { signal: controller.signal });
+        if (!resp.ok) throw new Error(`Horizons error: ${resp.status}`);
+        return await resp.json();
+    } finally {
+        clearTimeout(timeout);
+    }
+}
+
+export async function addSpacecraft(name, horizonsId, horizonsResponse) {
+    if (!wasmReady) await initWasm();
+    const payload = { name, horizons_id: horizonsId, horizons_response: horizonsResponse };
+    const json = add_spacecraft(JSON.stringify(payload));
     return JSON.parse(json);
 }

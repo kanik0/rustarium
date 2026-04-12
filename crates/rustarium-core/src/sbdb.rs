@@ -1,4 +1,4 @@
-use crate::custom_body::{CustomBody, SmallBodyType};
+use crate::custom_body::{CustomBody, PropagationMethod, SmallBodyType};
 use crate::nbody::orbital_elements::OrbitalElements;
 use serde::Deserialize;
 
@@ -87,11 +87,14 @@ impl SbdbResponse {
             name,
             designation: obj.des.clone(),
             body_type,
-            elements: OrbitalElements::from_au_and_degrees(a, e, i, om, w, ma),
-            epoch_jd,
+            propagation: PropagationMethod::Keplerian {
+                elements: OrbitalElements::from_au_and_degrees(a, e, i, om, w, ma),
+                epoch_jd,
+            },
             gm,
             diameter_km,
             abs_magnitude_h,
+            horizons_id: None,
         })
     }
 }
@@ -163,12 +166,12 @@ mod tests {
 
         assert_eq!(body.name, "Ceres");
         assert_eq!(body.body_type, SmallBodyType::Asteroid);
-        assert!((body.epoch_jd - 2460200.5).abs() < 0.001);
+        assert!((body.epoch_jd() - 2460200.5).abs() < 0.001);
         assert!((body.gm - 62.6284).abs() < 0.01);
         assert_eq!(body.diameter_km, Some(939.4));
         assert_eq!(body.abs_magnitude_h, Some(3.33));
         // Check orbital elements round-trip
-        let a_au = body.elements.semi_major_axis_km / crate::bodies::AU_KM;
+        let a_au = body.elements().unwrap().semi_major_axis_km / crate::bodies::AU_KM;
         assert!(
             (a_au - 2.766).abs() < 0.001,
             "a = {} AU",
@@ -203,7 +206,7 @@ mod tests {
         let body = resp.to_custom_body().expect("convert");
         assert_eq!(body.name, "Halley");
         assert_eq!(body.body_type, SmallBodyType::Comet);
-        assert!(body.elements.eccentricity > 0.96);
+        assert!(body.elements().unwrap().eccentricity > 0.96);
     }
 
     #[test]

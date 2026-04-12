@@ -99,9 +99,9 @@ pub enum Command {
         #[arg(long, default_value = "1")]
         step: u32,
     },
-    /// Track an asteroid, comet or dwarf planet from JPL SBDB
+    /// Track an asteroid, comet, dwarf planet, or spacecraft
     Track {
-        /// Name, designation, or SPK-ID (e.g. "Ceres", "99942", "1P/Halley")
+        /// Name, designation, or SPK-ID (e.g. "Ceres", "99942", "1P/Halley", "Voyager 1")
         query: String,
         /// Date (YYYY-MM-DD). Default: today
         #[arg(short, long)]
@@ -122,6 +122,9 @@ pub enum Command {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+        /// Force spacecraft search (JPL Horizons) instead of SBDB
+        #[arg(long)]
+        spacecraft: bool,
     },
 }
 
@@ -167,8 +170,8 @@ pub fn run(cli: Cli) {
         Some(Command::Ephemeris { body, start, days, step }) => {
             cmd_ephemeris(body, start, days, step)
         }
-        Some(Command::Track { query, date, days, step, city, lat, lon, json }) => {
-            cmd_track(query, date, days, step, city, lat, lon, json)
+        Some(Command::Track { query, date, days, step, city, lat, lon, json, spacecraft }) => {
+            cmd_track(query, date, days, step, city, lat, lon, json, spacecraft)
         }
     }
 }
@@ -699,9 +702,23 @@ fn cmd_track(
     lat: Option<f64>,
     lon: Option<f64>,
     json: bool,
+    spacecraft: bool,
 ) {
     let jd = parse_date_or_today(&date);
     let (loc, tz, loc_label) = resolve_location(&lat, &lon, &city);
+
+    // Auto-detect spacecraft from catalog, or use --spacecraft flag
+    let catalog_match = rustarium_core::horizons::search_catalog(&query);
+    if spacecraft || !catalog_match.is_empty() {
+        if let Some(entry) = catalog_match.first() {
+            cmd_track_spacecraft(entry, jd, days, step, &loc, &tz, &loc_label, json);
+        } else {
+            eprintln!("  {} No spacecraft matching '{}' in catalog.", "!".yellow(), query);
+            eprintln!("    Known spacecraft: {}", rustarium_core::horizons::SPACECRAFT_CATALOG.iter().map(|e| e.name).collect::<Vec<_>>().join(", "));
+            std::process::exit(1);
+        }
+        return;
+    }
 
     // Fetch from JPL SBDB
     println!(
@@ -792,15 +809,26 @@ fn cmd_track(
     if let Some(des) = &body.designation {
         kv("Designation", des);
     }
-    kv("Epoch (JD)", &format!("{:.1}", body.epoch_jd));
+    kv("Epoch (JD)", &format!("{:.1}", body.epoch_jd()));
 
-    let a_au = body.elements.semi_major_axis_km / rustarium_core::bodies::AU_KM;
-    section("Orbital Elements");
-    kv("Semi-major axis", &format!("{:.6} AU", a_au));
-    kv("Eccentricity", &format!("{:.6}", body.elements.eccentricity));
-    kv("Inclination", &format!("{:.4}°", body.elements.inclination_rad.to_degrees()));
-    kv("Asc. node (Ω)", &format!("{:.4}°", body.elements.longitude_ascending_node_rad.to_degrees()));
-    kv("Arg. perih. (ω)", &format!("{:.4}°", body.elements.argument_perihelion_rad.to_degrees()));
+    if let Some(el) = body.elements() {
+        let a_au = el.semi_major_axis_km / rustarium_core::bodies::AU_KM;
+        section("Orbital Elements");
+        kv("Semi-major axis", &format!("{:.6} AU", a_au));
+        kv("Eccentricity", &format!("{:.6}", el.eccentricity));
+        kv("Inclination", &format!("{:.4}°", el.inclination_rad.to_degrees()));
+        kv("Asc. node (Ω)", &format!("{:.4}°", el.longitude_ascending_node_rad.to_degrees()));
+        kv("Arg. perih. (ω)", &format!("{:.4}°", el.argument_perihelion_rad.to_degrees()));
+    }
+    if let Some(table) = body.ephemeris_table() {
+        section("Ephemeris");
+        kv("Points", &format!("{}", table.len()));
+        if let (Some(first), Some(last)) = (table.first(), table.last()) {
+            let (y1, m1, d1) = date_from_jd(JulianDay(first.jd));
+            let (y2, m2, d2) = date_from_jd(JulianDay(last.jd));
+            kv("Range", &format!("{:4}-{:02}-{:02} to {:4}-{:02}-{:02}", y1, m1, d1 as u32, y2, m2, d2 as u32));
+        }
+    }
 
     if let Some(d) = body.diameter_km {
         section("Physical");
@@ -950,6 +978,184 @@ fn print_track_json(body: &CustomBody, jd: JulianDay, days: u32, step: u32, loc:
         "ephemeris": ephemeris,
     });
     println!("{}", serde_json::to_string_pretty(&json).unwrap());
+}
+
+fn cmd_track_spacecraft(
+    entry: &&rustarium_core::horizons::SpacecraftEntry,
+    jd: JulianDay,
+    days: u32,
+    step: u32,
+    loc: &rustarium_core::coords::GeoLocation,
+    tz: &TzInfo,
+    loc_label: &str,
+    json: bool,
+) {
+    println!(
+        "\n  {} Fetching trajectory for '{}' (ID {}) from JPL Horizons...",
+        "⟳".bright_blue(),
+        entry.name.bright_white(),
+        entry.horizons_id
+    );
+
+    let (y, _, _) = date_from_jd(jd);
+    let start = format!("{}-01-01", y - 1);
+    let stop = format!("{}-01-01", y + 1);
+    let horizons_url = format!(
+        "https://ssd.jpl.nasa.gov/api/horizons.api?format=json\
+        &COMMAND='{}'\
+        &OBJ_DATA='YES'&MAKE_EPHEM='YES'&EPHEM_TYPE='VECTORS'\
+        &CENTER='500@10'&START_TIME='{}'\
+        &STOP_TIME='{}'&STEP_SIZE='5d'\
+        &REF_PLANE='ECLIPTIC'&REF_SYSTEM='ICRF'&OUT_UNITS='AU-D'",
+        urlencoding::encode(entry.horizons_id),
+        urlencoding::encode(&start),
+        urlencoding::encode(&stop),
+    );
+
+    let agent = ureq::Agent::new_with_config(
+        ureq::config::Config::builder()
+            .http_status_as_error(false)
+            .max_redirects(0)
+            .build(),
+    );
+    let resp_text = match agent.get(&horizons_url).call() {
+        Ok(resp) => match resp.into_body().read_to_string() {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("  {} Failed to read Horizons response: {}", "✗".red(), e);
+                std::process::exit(1);
+            }
+        },
+        Err(e) => {
+            eprintln!("  {} Failed to reach JPL Horizons: {}", "✗".red(), e);
+            std::process::exit(1);
+        }
+    };
+
+    let resp: rustarium_core::horizons::HorizonsResponse = match serde_json::from_str(&resp_text) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("  {} Invalid Horizons response: {}", "✗".red(), e);
+            std::process::exit(1);
+        }
+    };
+
+    let body = match resp.to_custom_body(entry.name, entry.horizons_id, Some(entry)) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("  {} {}", "✗".red(), e);
+            std::process::exit(1);
+        }
+    };
+
+    let point_count = body.ephemeris_table().map(|t| t.len()).unwrap_or(0);
+    println!("  {} {} trajectory loaded ({} points)\n", "✓".green(), entry.name.bright_white().bold(), point_count);
+
+    if json {
+        print_track_json(&body, jd, days, step, loc);
+        return;
+    }
+
+    header(entry.name);
+    section("Spacecraft");
+    kv("Horizons ID", entry.horizons_id);
+    kv("Launched", &format!("{}", entry.launch_year));
+    kv("Status", entry.status);
+    kv("Mission", entry.description);
+
+    if let Some(table) = body.ephemeris_table() {
+        section("Ephemeris Cache");
+        kv("Points", &format!("{}", table.len()));
+        if let (Some(first), Some(last)) = (table.first(), table.last()) {
+            let (y1, m1, d1) = date_from_jd(JulianDay(first.jd));
+            let (y2, m2, d2) = date_from_jd(JulianDay(last.jd));
+            kv("Range", &format!("{:4}-{:02}-{:02} to {:4}-{:02}-{:02}", y1, m1, d1 as u32, y2, m2, d2 as u32));
+        }
+    }
+
+    // Position
+    let (y, m, d) = date_from_jd(jd);
+    section(&format!("Position on {:4}-{:02}-{:02}", y, m, d as u32));
+    let eq = body.apparent_equatorial(jd);
+    let geo = body.geocentric_position(jd);
+    let helio = body.heliocentric_position(jd);
+    kv_colored("Right Ascension", &format_ra(eq.ra));
+    kv_colored("Declination", &format_dec(eq.dec));
+    kv_colored("Distance (Earth)", &format!("{:.4} AU", geo.distance));
+    kv("Distance (Sun)", &format!("{:.4} AU", helio.distance));
+
+    // Velocity
+    if let Some((vx, vy, vz)) = body.velocity_au_day(jd) {
+        let au_day_to_km_s = rustarium_core::bodies::AU_KM / 86400.0;
+        let speed = (vx * vx + vy * vy + vz * vz).sqrt() * au_day_to_km_s;
+        kv("Velocity", &format!("{:.2} km/s", speed));
+        let light_hours = geo.distance * rustarium_core::bodies::AU_KM / (299792.458 * 3600.0);
+        kv("Light-time", &format!("{:.2} hours", light_hours));
+    }
+
+    // Rise/set
+    let jd_0h = JulianDay((jd.0 - 0.5).floor() + 0.5);
+    let h0 = (-0.5667_f64).to_radians();
+    let tz_name = tz.name_at(jd);
+    section(&format!("Rise/Set — {} ({})", loc_label, tz_name));
+    let eq_fn = |jd: JulianDay| body.apparent_equatorial(jd);
+    match rise_set::rise_transit_set_custom(jd_0h, loc, h0, eq_fn) {
+        Ok(events) => {
+            for ev in &events {
+                let icon = match ev.event {
+                    EventType::Rise => "↑",
+                    EventType::Transit => "◉",
+                    EventType::Set => "↓",
+                };
+                let label = match ev.event {
+                    EventType::Rise => "Rise   ",
+                    EventType::Transit => "Transit",
+                    EventType::Set => "Set    ",
+                };
+                let extra = match ev.event {
+                    EventType::Rise | EventType::Set => format!("  az {:.1}°", ev.azimuth_deg.unwrap_or(0.0)),
+                    EventType::Transit => format!("  alt {:.1}°", ev.altitude_deg.unwrap_or(0.0)),
+                };
+                println!("    {} {} {}{}", icon.yellow(), label, jd_to_local_time_str(ev.jd, tz).bright_white(), extra.dimmed());
+            }
+        }
+        Err(_) => println!("    {}", "Not visible from this location today.".dimmed()),
+    }
+
+    // Ephemeris table
+    section(&format!("Ephemeris — {} days (step {}d)", days, step));
+    let mut table = Table::new();
+    table
+        .load_preset(UTF8_FULL_CONDENSED)
+        .set_content_arrangement(ContentArrangement::Dynamic)
+        .set_header(vec![
+            Cell::new("Date").add_attribute(Attribute::Bold),
+            Cell::new("RA").add_attribute(Attribute::Bold),
+            Cell::new("Dec").add_attribute(Attribute::Bold),
+            Cell::new("Δ Earth").add_attribute(Attribute::Bold),
+            Cell::new("r Sun").add_attribute(Attribute::Bold),
+        ]);
+
+    let mut i = 0u32;
+    while i < days {
+        let day_jd = jd + i as f64;
+        let (dy, dm, dd) = date_from_jd(day_jd);
+        let eq = body.apparent_equatorial(day_jd);
+        let geo = body.geocentric_position(day_jd);
+        let helio = body.heliocentric_position(day_jd);
+        table.add_row(vec![
+            Cell::new(format!("{:4}-{:02}-{:02}", dy, dm, dd as u32)),
+            Cell::new(format_ra(eq.ra)),
+            Cell::new(format_dec(eq.dec)),
+            Cell::new(format!("{:.4}", geo.distance)),
+            Cell::new(format!("{:.4}", helio.distance)),
+        ]);
+        i += step;
+    }
+
+    println!();
+    println!("    {}", table.to_string().replace('\n', "\n    "));
+    println!();
 }
 
 // --- Helpers ---
