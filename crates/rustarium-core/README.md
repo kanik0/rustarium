@@ -26,5 +26,6 @@ cargo run --example verify_positions      # Compare with JPL Horizons
 cargo run --example verify_nbody          # N-body vs VSOP87 cross-validation
 cargo run --example verify_moon_riseset   # Moon position + rise/set times
 cargo run --example verify_eclipses       # Eclipse predictions vs NASA catalog
-cargo run --example custom_body           # Adding asteroids to the simulation
+cargo run --example custom_body           # Adding asteroids to the N-body simulation
+cargo run --example track_asteroid        # Track asteroids/comets via SBDB data
 ```

@@ -2,6 +2,8 @@
 
 **Solar System Prediction Engine** — a Rust program that predicts positions of solar system objects, generates astronomical reports, and provides a 3D web visualization. All computation runs as WebAssembly, either server-side (Cloudflare Worker) or entirely client-side in the browser.
 
+**Live demo**: https://rustarium.gateway0.workers.dev/
+
 ## Features
 
 - **Planet positions** — heliocentric and geocentric coordinates for all 8 planets using VSOP87D analytical theory (~1 arcsecond accuracy)
@@ -10,6 +12,7 @@
 - **Eclipse prediction** — lunar and solar eclipses with contact times, magnitude, and local visibility
 - **N-body simulation** — gravitational simulation with Dormand-Prince RK45 and Wisdom-Holman symplectic integrators
 - **Custom objects** — add asteroids, comets, or spacecraft via orbital elements or state vectors
+- **Track any small body** — search NASA JPL's Small-Body Database by name, designation, or SPK-ID and track asteroids, comets, and dwarf planets on the fly
 - **3D visualization** — Three.js orrery with real orbital elements, inclinations, and eccentricities
 - **CLI** — beautiful command-line interface with colored output, timezone support, and multiple output formats
 
@@ -25,6 +28,7 @@ cargo run -p rustarium-cli -- riseset --city roma --days 7
 cargo run -p rustarium-cli -- moon --calendar
 cargo run -p rustarium-cli -- eclipse lunar --year 2025
 cargo run -p rustarium-cli -- ephemeris jupiter --days 30
+cargo run -p rustarium-cli -- track Ceres --city roma  # Track an asteroid
 ```
 
 ### Web (Client-Side WASM)
@@ -32,23 +36,23 @@ cargo run -p rustarium-cli -- ephemeris jupiter --days 30
 ```bash
 # Build the WASM module
 cd crates/rustarium-wasm
-wasm-pack build --target web --release
+wasm-pack build --target web --out-dir site/pkg --release
 
-# Copy to site directory
-cp pkg/rustarium_wasm.js site/pkg/
-cp pkg/rustarium_wasm_bg.wasm site/pkg/
-
-# Serve locally
-python3 -m http.server 8080 --directory site
-# Open http://localhost:8080
+# Serve locally (includes SBDB proxy for asteroid search)
+node dev-server.mjs
+# Open http://localhost:3000
 ```
 
-### Deploy to Cloudflare Pages
+The dev server serves static files and proxies `/api/sbdb/search` requests to NASA JPL's Small-Body Database API (required because the SBDB API does not support CORS).
+
+### Deploy to Cloudflare Workers
 
 ```bash
-cd crates/rustarium-wasm
-npx wrangler pages deploy site/ --project-name rustarium
+cd crates/rustarium-web
+npx wrangler deploy
 ```
+
+The Worker serves the API endpoints and proxies SBDB requests via `/api/sbdb/search`.
 
 ## Architecture
 
@@ -83,6 +87,8 @@ The core library is the heart of the project. It compiles to both native and `wa
 | `rise_set` | Rise/transit/set calculations |
 | `eclipse` | Lunar and solar eclipse prediction |
 | `nbody` | N-body simulation (RK45 + symplectic integrators) |
+| `custom_body` | Keplerian propagation for asteroids, comets, dwarf planets |
+| `sbdb` | NASA JPL Small-Body Database response parser |
 
 ### Data Sources
 
@@ -95,6 +101,7 @@ All data is embedded in the source code — no external files are downloaded at 
 | N-body initial conditions | JPL Horizons API (DE441) | J2000.0 |
 | Nutation | IAU 2000B (77 lunisolar terms) | Continuous |
 | Asteroid state vectors | JPL Horizons API (DE441) | J2000.0 |
+| Custom body elements | JPL Small-Body Database API (fetched on demand) | Osculating epoch |
 
 ### Precision
 
@@ -142,6 +149,12 @@ rustarium eclipse solar --year 2026
 
 # Ephemeris table
 rustarium ephemeris jupiter --days 60 --step 5
+
+# Track asteroids, comets, dwarf planets (fetches from JPL SBDB)
+rustarium track Ceres --city roma
+rustarium track 99942 --days 60 --step 5        # Apophis by SPK-ID
+rustarium track 1P                               # Halley's Comet
+rustarium track "2024 YR4" --json               # JSON output
 ```
 
 The CLI supports city names in Italian (roma, milano, napoli, giove, marte, luna...) and displays times in local timezone with UT in parentheses.
@@ -159,14 +172,31 @@ When deployed as a Cloudflare Worker (`rustarium-web`):
 | `GET /api/eclipse/lunar?year=2025&range=2` | Lunar eclipse search |
 | `GET /api/eclipse/solar?year=2025&range=2` | Solar eclipse search |
 | `GET /api/ephemeris/:body?date=...&days=30&step=1` | Multi-day ephemeris |
+| `GET /api/sbdb/search?sstr=Ceres` | Search JPL Small-Body Database (proxy) |
+| `POST /api/custom/position` | Compute position from orbital elements |
 
-## Adding Custom Objects
+## Tracking Custom Objects
+
+### CLI — search by name
+
+The `track` command fetches orbital data from NASA JPL's Small-Body Database and displays position, rise/set times, and an ephemeris table:
+
+```bash
+rustarium track Ceres --city roma
+```
+
+### Web — add to the 3D orrery
+
+Click the **"+ Add"** button in the bottom bar, search for any asteroid, comet, or dwarf planet, and click "Add to Orrery". The object appears in the 3D scene with its orbit, and its position updates in real time. Tracked objects persist across page reloads via localStorage.
+
+### Rust library — N-body simulation
+
+For high-precision work, add objects directly to the N-body integrator:
 
 ```rust
 use rustarium_core::nbody::{NBodySystem, NBodyObject, OrbitalElements};
 use rustarium_core::bodies::SUN_GM;
 
-// From orbital elements (easiest — data from JPL SBDB)
 let elements = OrbitalElements::from_au_and_degrees(
     2.7691,  // semi-major axis (AU)
     0.0760,  // eccentricity
@@ -179,6 +209,31 @@ let state = elements.to_state_vector(SUN_GM);
 let mut system = NBodySystem::solar_system();
 system.add_body(NBodyObject::new("Ceres", 62.6284, state));
 system.propagate_to(target_jd, Some(1.0));
+```
+
+### Rust library — Keplerian propagation
+
+For quick position lookups without full N-body simulation:
+
+```rust
+use rustarium_core::custom_body::{CustomBody, SmallBodyType};
+use rustarium_core::nbody::orbital_elements::OrbitalElements;
+use rustarium_core::time::jd_from_date;
+
+let body = CustomBody {
+    name: "Ceres".into(),
+    designation: Some("1".into()),
+    body_type: SmallBodyType::DwarfPlanet,
+    elements: OrbitalElements::from_au_and_degrees(2.766, 0.0796, 10.59, 80.31, 73.60, 130.0),
+    epoch_jd: 2460600.5,
+    gm: 62.6284,
+    diameter_km: Some(939.4),
+    abs_magnitude_h: Some(3.33),
+};
+
+let jd = jd_from_date(2026, 4, 12.0);
+let pos = body.heliocentric_position(jd);     // ecliptic lon/lat/distance
+let eq = body.apparent_equatorial(jd);         // RA/Dec
 ```
 
 ## License

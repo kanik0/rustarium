@@ -18,7 +18,7 @@ use rustarium_core::time::{date_from_jd, jd_from_date, JulianDay};
     name = "rustarium",
     about = "✦ Solar System Prediction Engine",
     version,
-    after_help = "Examples:\n  rustarium sky\n  rustarium position mars\n  rustarium riseset --city roma\n  rustarium moon\n  rustarium eclipse lunar --year 2025\n  rustarium ephemeris jupiter --days 30"
+    after_help = "Examples:\n  rustarium sky\n  rustarium position mars\n  rustarium riseset --city roma\n  rustarium moon\n  rustarium eclipse lunar --year 2025\n  rustarium ephemeris jupiter --days 30\n  rustarium track Ceres --city roma\n  rustarium track 99942 --json"
 )]
 pub struct Cli {
     #[command(subcommand)]
