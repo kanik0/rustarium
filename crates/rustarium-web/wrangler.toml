@@ -3,7 +3,7 @@ main = "build/worker/shim.mjs"
 compatibility_date = "2024-11-01"
 
 [build]
-command = "cargo install worker-build && worker-build --release"
+command = ". \"$HOME/.cargo/env\" 2>/dev/null; cargo install worker-build && worker-build --release"
 
 [assets]
 directory = "./public"
